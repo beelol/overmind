@@ -6,53 +6,114 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-targets --all-features
 
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-targets --all-features
+
+  build:
+    name: build (${{ matrix.name }})
     needs: test
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - name: linux-x64
+            os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: macos-latest
+            archive: tar.gz
+          - name: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            cross: true
+          - name: macos-x64
+            os: macos-latest
             target: x86_64-apple-darwin
-          - os: macos-latest
+            archive: tar.gz
+          - name: macos-arm64
+            os: macos-latest
             target: aarch64-apple-darwin
-          - os: windows-latest
+            archive: tar.gz
+          - name: windows-x64
+            os: windows-latest
             target: x86_64-pc-windows-msvc
+            archive: zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --release --target ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross == true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build
+        shell: bash
+        run: |
+          if [[ "${{ matrix.cross }}" == "true" ]]; then
+            cross build --release --locked --target "${{ matrix.target }}"
+          else
+            cargo build --release --locked --target "${{ matrix.target }}"
+          fi
+
       - name: Package Unix
         if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/ovmd dist/ovmd
-          tar -C dist -czf ovmd-${{ matrix.target }}.tar.gz ovmd
+          cp "target/${{ matrix.target }}/release/ovmd" dist/ovmd
+          tar -C dist -czf "ovmd-${{ matrix.target }}.tar.gz" ovmd
+
       - name: Package Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist
-          Copy-Item target/${{ matrix.target }}/release/ovmd.exe dist/ovmd.exe
-          Compress-Archive -Path dist/ovmd.exe -DestinationPath ovmd-${{ matrix.target }}.zip
-      - uses: softprops/action-gh-release@v2
+          Copy-Item "target/${{ matrix.target }}/release/ovmd.exe" dist/ovmd.exe
+          Compress-Archive -Path dist/ovmd.exe -DestinationPath "ovmd-${{ matrix.target }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: ovmd-${{ matrix.target }}.*
+          name: ovmd-${{ matrix.target }}
+          path: ovmd-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+      - name: Upload release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ovmd-${{ matrix.target }}.${{ matrix.archive }}
