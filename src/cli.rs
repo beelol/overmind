@@ -35,6 +35,11 @@ pub enum Command {
     },
     /// Inspect effective config and source state.
     Doctor(ProjectOptions),
+    /// Manage ovmd config files.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
 }
 
 #[derive(Debug, Args, Clone)]
@@ -114,6 +119,33 @@ pub enum PackCommand {
 pub enum ModuleCommand {
     /// List modules in the effective pack.
     List(ProjectOptions),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// Create a default config file.
+    Init(ConfigInitOptions),
+    /// Print config file path.
+    Path(ConfigOptions),
+    /// Open config file in $EDITOR.
+    Edit(ConfigOptions),
+}
+
+#[derive(Debug, Args, Clone, Default)]
+pub struct ConfigOptions {
+    /// Use global config (~/.config/overmind/config.toml).
+    #[arg(long)]
+    pub global: bool,
+}
+
+#[derive(Debug, Args, Clone, Default)]
+pub struct ConfigInitOptions {
+    #[command(flatten)]
+    pub config: ConfigOptions,
+
+    /// Overwrite an existing config file.
+    #[arg(long)]
+    pub force: bool,
 }
 
 impl ProjectOptions {
