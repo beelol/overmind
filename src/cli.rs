@@ -16,6 +16,8 @@ pub struct Cli {
 pub enum Command {
     /// Create project config and render rule targets.
     Init(ProjectOptions),
+    /// Remove rendered Overmind sections without deleting config.
+    Unlink(ProjectOptions),
     /// Update the configured source and render rule targets.
     Sync(SyncOptions),
     /// Manage rule sources.

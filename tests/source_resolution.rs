@@ -23,9 +23,11 @@ fn derives_readable_cache_keys() {
 #[test]
 fn preserves_project_specific_content() {
     let next = replace_managed_block(
-        "# Existing\n\n- keep local rule\n",
+        "<!-- OVERMIND:START source=old pack=universal -->\nold\n<!-- OVERMIND:END -->\n\n- keep local rule\n",
         "<!-- OVERMIND:START source=x pack=universal -->\nnew\n<!-- OVERMIND:END -->",
-    );
+    )
+    .unwrap();
     assert!(next.contains("- keep local rule"));
     assert!(next.contains("new"));
+    assert!(!next.contains("old"));
 }
