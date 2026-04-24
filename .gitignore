@@ -2,4 +2,15 @@
 /bin/
 /ovmd
 /ovmd.exe
+
+# Overmind-generated local agent files for this repo.
+/.agent/
+/.clinerules/
+/.cursor/
+/.cursorrules
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md
+/.overmind.toml
+
 .DS_Store

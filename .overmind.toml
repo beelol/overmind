@@ -1,0 +1,7 @@
+[source]
+uri = "/Users/bilal/playground/rules"
+ref = "master"
+pack = "universal"
+
+[sync]
+targets = ["agents", "claude", "gemini", "cursor", "cursor-legacy", "cline", "antigravity"]
