@@ -122,7 +122,7 @@ ref = "{}"
 pack = "{}"
 
 [sync]
-targets = ["agents", "claude", "gemini", "cursor", "cursor-legacy", "cline", "antigravity"]
+targets = ["agents", "claude", "gemini", "cursor", "cursor-legacy", "cline", "roo", "antigravity"]
 "#,
         source.uri, source.ref_name, source.pack
     );

@@ -339,6 +339,7 @@ fn is_generated_scaffold_line(line: &str) -> bool {
         "---"
             | "# Agent Instructions"
             | "# Universal Agent Rules"
+            | "# Roo Code Rules"
             | "## Project Instructions"
             | "description: Universal baseline agent rules"
             | "globs:"
@@ -349,6 +350,7 @@ fn is_generated_scaffold_line(line: &str) -> bool {
             | "Add project-specific Cursor instructions here."
             | "Add project-specific legacy Cursor instructions here."
             | "Add project-specific Cline instructions here."
+            | "Add project-specific Roo Code instructions here."
             | "Add project-specific Antigravity instructions here."
     )
 }
@@ -434,7 +436,7 @@ fn render_builtin_wrappers(
                 "{}\n\n## Project Instructions\n\nAdd project-specific Gemini instructions here.\n",
                 block
             ),
-            ".cursor/rules/universal-agent-rules.mdc" => format!(
+            ".cursor/rules/AGENTS.mdc" => format!(
                 "---\ndescription: Universal baseline agent rules\nglobs:\nalwaysApply: true\n---\n\n{}\n\n## Project Instructions\n\nAdd project-specific Cursor instructions here.\n",
                 block
             ),
@@ -442,11 +444,15 @@ fn render_builtin_wrappers(
                 "{}\n\n## Project Instructions\n\nAdd project-specific legacy Cursor instructions here.\n",
                 block
             ),
-            ".clinerules/universal-agent-rules.md" => format!(
+            ".clinerules/AGENTS.md" => format!(
                 "# Universal Agent Rules\n\n{}\n\n## Project Instructions\n\nAdd project-specific Cline instructions here.\n",
                 block
             ),
-            ".agent/rules/universal-agent-rules.md" => format!(
+            ".roo/rules/AGENTS.md" => format!(
+                "# Roo Code Rules\n\n{}\n\n## Project Instructions\n\nAdd project-specific Roo Code instructions here.\n",
+                block
+            ),
+            ".agent/rules/AGENTS.md" => format!(
                 "# Universal Agent Rules\n\n{}\n\n## Project Instructions\n\nAdd project-specific Antigravity instructions here.\n",
                 block
             ),
@@ -461,14 +467,15 @@ fn render_builtin_wrappers(
     Ok(())
 }
 
-fn builtin_wrapper_paths() -> [&'static str; 6] {
+fn builtin_wrapper_paths() -> [&'static str; 7] {
     [
         "CLAUDE.md",
         "GEMINI.md",
-        ".cursor/rules/universal-agent-rules.mdc",
+        ".cursor/rules/AGENTS.mdc",
         ".cursorrules",
-        ".clinerules/universal-agent-rules.md",
-        ".agent/rules/universal-agent-rules.md",
+        ".clinerules/AGENTS.md",
+        ".roo/rules/AGENTS.md",
+        ".agent/rules/AGENTS.md",
     ]
 }
 
