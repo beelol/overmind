@@ -18,6 +18,8 @@ Install from release binaries:
 curl -fsSL https://raw.githubusercontent.com/beelol/overmind/master/scripts/install.sh | bash
 ```
 
+Push a `v*` tag such as `v0.1.1` to publish a GitHub release with platform binaries under [Releases](https://github.com/beelol/overmind/releases).
+
 Local development from this repo:
 
 ```bash
