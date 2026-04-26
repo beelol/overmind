@@ -18,7 +18,7 @@ Install from release binaries:
 curl -fsSL https://raw.githubusercontent.com/beelol/overmind/master/scripts/install.sh | bash
 ```
 
-Push a `v*` tag such as `v0.1.1` to publish a GitHub release with platform binaries under [Releases](https://github.com/beelol/overmind/releases).
+Push a `v*` tag such as `v0.1.2` to publish a GitHub release with platform binaries under [Releases](https://github.com/beelol/overmind/releases).
 
 Local development from this repo:
 
@@ -115,6 +115,7 @@ ovmd sync
 Then add local notes outside the Overmind block in generated files such as `AGENTS.md`.
 
 Keep those files untracked or ignored in that repo. Future `ovmd sync` runs replace only the Overmind block and preserve your local notes.
+If a target file already exists without an Overmind block, `ovmd sync` inserts one and keeps the rest of the file.
 
 ### Remove Overmind From a Project
 
@@ -160,7 +161,8 @@ Edit outside that block for project-specific guidance.
 
 - Missing file: create it.
 - Existing file with an Overmind block: replace only the block.
-- Existing file without an Overmind block: refuse to overwrite and ask for manual cleanup.
+- Existing file without an Overmind block: insert one and preserve the existing file content.
+- Existing file with a broken Overmind block: refuse to continue and ask for manual cleanup.
 
 ## Source Resolution
 
