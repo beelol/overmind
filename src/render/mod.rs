@@ -29,7 +29,6 @@ pub struct Module {
 pub struct Target {
     pub id: String,
     pub path: String,
-    pub template: String,
     #[serde(default = "default_true")]
     pub managed: bool,
 }
@@ -110,35 +109,25 @@ pub fn render_project(
     }
 
     let manifest = load_manifest(source, &effective.pack)?;
-    let root = pack_root(source, &effective.pack);
     for target in manifest.targets {
         if target.id == "agents" || !target.managed {
             continue;
         }
-        let template_path = root.join(target.template);
-        let template = fs::read_to_string(&template_path)
-            .with_context(|| format!("failed to read template {}", template_path.display()))?;
         let block = managed_block(source, effective, &rules);
-        let rendered = apply_template(&template, source, effective, &rules, &block);
-        write_section_managed_file(
-            &project_root.join(target.path),
-            &rendered,
-            &block,
-            options.dry_run,
-        )?;
+        write_virtualized_file(&project_root.join(target.path), &block, options.dry_run)?;
     }
 
     Ok(())
 }
 
-pub fn unlink_project(
+pub fn desync_project(
     project_root: &Path,
     source: &ResolvedSource,
     effective: &EffectiveSource,
     dry_run: bool,
 ) -> Result<()> {
     for target in managed_target_paths(source, effective)? {
-        unlink_managed_file(&project_root.join(target), dry_run)?;
+        desync_managed_file(&project_root.join(target), dry_run)?;
     }
     Ok(())
 }
@@ -226,32 +215,28 @@ pub fn replace_managed_block(existing: &str, block: &str) -> Result<String> {
     );
 }
 
-fn upsert_managed_block(existing: &str, initial_body: &str, block: &str) -> Result<String> {
+fn upsert_managed_block(path: &Path, existing: &str, block: &str) -> Result<String> {
     if existing.contains(START_MARKER) || existing.contains(END_MARKER) {
+        let without_block = remove_managed_block(existing)?;
+        if is_overmind_virtualized_only(&without_block) {
+            return Ok(existing_virtualized_only_body_for_path(
+                path,
+                &without_block,
+                block,
+            ));
+        }
         return replace_managed_block(existing, block);
     }
 
-    insert_managed_block(existing, initial_body, block)
+    insert_managed_block(existing, block)
 }
 
-fn insert_managed_block(existing: &str, initial_body: &str, block: &str) -> Result<String> {
+fn insert_managed_block(existing: &str, block: &str) -> Result<String> {
     if existing.trim().is_empty() {
-        return Ok(initial_body.to_string());
+        return Ok(managed_only_body(block));
     }
 
-    let (prefix, suffix) = initial_body
-        .split_once(block)
-        .ok_or_else(|| anyhow!("template does not contain an Overmind managed block"))?;
-
-    let insert_at = exact_prefix_insert_position(existing, prefix)
-        .or_else(|| frontmatter_insert_position(existing))
-        .or_else(|| {
-            last_non_empty_line(prefix).and_then(|line| insert_after_matching_line(existing, line))
-        })
-        .or_else(|| {
-            first_non_empty_line(suffix)
-                .and_then(|line| insert_before_matching_line(existing, line))
-        })
+    let insert_at = frontmatter_insert_position(existing)
         .or_else(|| first_heading_insert_position(existing))
         .unwrap_or(0);
 
@@ -260,14 +245,6 @@ fn insert_managed_block(existing: &str, initial_body: &str, block: &str) -> Resu
         block,
         &existing[insert_at..],
     ))
-}
-
-fn exact_prefix_insert_position(existing: &str, prefix: &str) -> Option<usize> {
-    if prefix.is_empty() || !existing.starts_with(prefix) {
-        return None;
-    }
-
-    Some(prefix.len())
 }
 
 fn frontmatter_insert_position(existing: &str) -> Option<usize> {
@@ -303,41 +280,6 @@ fn first_heading_insert_position(existing: &str) -> Option<usize> {
     None
 }
 
-fn last_non_empty_line(text: &str) -> Option<&str> {
-    text.lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-}
-
-fn first_non_empty_line(text: &str) -> Option<&str> {
-    text.lines().map(str::trim).find(|line| !line.is_empty())
-}
-
-fn insert_after_matching_line(existing: &str, needle: &str) -> Option<usize> {
-    let mut offset = 0;
-    for line in existing.split_inclusive('\n') {
-        if line.strip_suffix('\n').unwrap_or(line).trim() == needle {
-            return Some(offset + line.len());
-        }
-        offset += line.len();
-    }
-
-    None
-}
-
-fn insert_before_matching_line(existing: &str, needle: &str) -> Option<usize> {
-    let mut offset = 0;
-    for line in existing.split_inclusive('\n') {
-        if line.strip_suffix('\n').unwrap_or(line).trim() == needle {
-            return Some(offset);
-        }
-        offset += line.len();
-    }
-
-    None
-}
-
 fn stitch_sections(prefix: &str, block: &str, suffix: &str) -> String {
     let mut sections = Vec::new();
 
@@ -361,8 +303,7 @@ fn render_agents(
 ) -> Result<()> {
     let target = project_root.join("AGENTS.md");
     let block = managed_block(source, effective, rules);
-    let initial_body = default_agent_rule_body(&block);
-    write_section_managed_file(&target, &initial_body, &block, dry_run)
+    write_virtualized_file(&target, &block, dry_run)
 }
 
 fn write_file_preserving_user_content(path: &Path, body: &str, dry_run: bool) -> Result<()> {
@@ -389,7 +330,7 @@ fn write_file_preserving_user_content(path: &Path, body: &str, dry_run: bool) ->
     Ok(())
 }
 
-fn unlink_managed_file(path: &Path, dry_run: bool) -> Result<()> {
+fn desync_managed_file(path: &Path, dry_run: bool) -> Result<()> {
     if !path.exists() {
         println!("Missing {}", path.display());
         return Ok(());
@@ -402,7 +343,7 @@ fn unlink_managed_file(path: &Path, dry_run: bool) -> Result<()> {
     }
 
     let next = remove_managed_block(&existing)?;
-    if is_generated_scaffold_only(&next) {
+    if should_delete_desynced_file(path, &next) {
         if dry_run {
             println!("Would delete {}", path.display());
         } else {
@@ -413,12 +354,13 @@ fn unlink_managed_file(path: &Path, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
+    let next = desynced_body_for_path(path, &next);
     if dry_run {
         println!("Would update {}", path.display());
         return Ok(());
     }
 
-    fs::write(path, trim_unlinked_content(&next))
+    fs::write(path, trim_desynced_content(&next))
         .with_context(|| format!("failed to write {}", path.display()))?;
     println!("Updated {}", path.display());
     Ok(())
@@ -435,7 +377,7 @@ fn remove_managed_block(existing: &str) -> Result<String> {
         }
 
         bail!(
-            "\x1b[31mfound {} without matching {}. Manually clean the Overmind block before unlinking.\x1b[0m",
+            "\x1b[31mfound {} without matching {}. Manually clean the Overmind block before desyncing.\x1b[0m",
             START_MARKER,
             END_MARKER
         );
@@ -443,7 +385,7 @@ fn remove_managed_block(existing: &str) -> Result<String> {
 
     if existing.contains(END_MARKER) {
         bail!(
-            "\x1b[31mfound {} without matching {}. Manually clean the Overmind block before unlinking.\x1b[0m",
+            "\x1b[31mfound {} without matching {}. Manually clean the Overmind block before desyncing.\x1b[0m",
             END_MARKER,
             START_MARKER
         );
@@ -452,14 +394,14 @@ fn remove_managed_block(existing: &str) -> Result<String> {
     Ok(existing.to_string())
 }
 
-fn is_generated_scaffold_only(body: &str) -> bool {
+fn is_overmind_virtualized_only(body: &str) -> bool {
     body.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .all(is_generated_scaffold_line)
+        .all(is_legacy_generated_scaffold_line)
 }
 
-fn is_generated_scaffold_line(line: &str) -> bool {
+fn is_legacy_generated_scaffold_line(line: &str) -> bool {
     matches!(
         line,
         "---"
@@ -481,27 +423,16 @@ fn is_generated_scaffold_line(line: &str) -> bool {
     )
 }
 
-fn trim_unlinked_content(body: &str) -> String {
+fn trim_desynced_content(body: &str) -> String {
     format!("{}\n", body.trim())
 }
 
-fn write_section_managed_file(
-    path: &Path,
-    initial_body: &str,
-    block: &str,
-    dry_run: bool,
-) -> Result<()> {
+fn write_virtualized_file(path: &Path, block: &str, dry_run: bool) -> Result<()> {
     let body = if path.exists() {
         let existing = fs::read_to_string(path)?;
-        upsert_managed_block(&existing, initial_body, block)?
+        upsert_managed_block(path, &existing, block)?
     } else {
-        if !initial_body.contains(START_MARKER) || !initial_body.contains(END_MARKER) {
-            bail!(
-                "template for {} does not contain an Overmind managed block",
-                path.display()
-            );
-        }
-        initial_body.to_string()
+        initial_body_for_path(path, block)
     };
 
     write_file_preserving_user_content(path, &body, dry_run)
@@ -516,25 +447,74 @@ fn managed_block(source: &ResolvedSource, effective: &EffectiveSource, rules: &s
     )
 }
 
-fn default_agent_rule_body(block: &str) -> String {
-    format!(
-        "# Agent Instructions\n\n{}\n\n## Project Instructions\n\nAdd project-specific instructions here.\n",
-        block
-    )
+fn managed_only_body(block: &str) -> String {
+    format!("{}\n", block.trim())
 }
 
-fn apply_template(
-    template: &str,
-    source: &ResolvedSource,
-    effective: &EffectiveSource,
-    rules: &str,
-    overmind_block: &str,
-) -> String {
-    template
-        .replace("{{source}}", &source.label)
-        .replace("{{pack}}", &effective.pack)
-        .replace("{{overmind_block}}", overmind_block)
-        .replace("{{rules}}", rules.trim())
+fn initial_body_for_path(path: &Path, block: &str) -> String {
+    if let Some(policy) = product_file_policy(path) {
+        return format!("{}{}", policy.created_file_prefix, managed_only_body(block));
+    }
+
+    managed_only_body(block)
+}
+
+fn existing_virtualized_only_body_for_path(path: &Path, remaining: &str, block: &str) -> String {
+    if let Some(policy) = product_file_policy(path) {
+        if policy.preserve_existing_frontmatter {
+            if let Some(frontmatter) = leading_frontmatter(remaining) {
+                return stitch_sections(frontmatter, block, "");
+            }
+        }
+    }
+
+    managed_only_body(block)
+}
+
+fn should_delete_desynced_file(path: &Path, remaining: &str) -> bool {
+    if let Some(policy) = product_file_policy(path) {
+        if policy.preserve_existing_frontmatter
+            && is_overmind_virtualized_only(remaining)
+            && leading_frontmatter(remaining).is_some()
+        {
+            return false;
+        }
+    }
+
+    is_overmind_virtualized_only(remaining)
+}
+
+fn desynced_body_for_path(path: &Path, remaining: &str) -> String {
+    if let Some(policy) = product_file_policy(path) {
+        if policy.preserve_existing_frontmatter && is_overmind_virtualized_only(remaining) {
+            if let Some(frontmatter) = leading_frontmatter(remaining) {
+                return frontmatter.to_string();
+            }
+        }
+    }
+
+    remaining.to_string()
+}
+
+fn leading_frontmatter(body: &str) -> Option<&str> {
+    frontmatter_insert_position(body).map(|end| &body[..end])
+}
+
+#[derive(Clone, Copy)]
+struct ProductFilePolicy {
+    created_file_prefix: &'static str,
+    preserve_existing_frontmatter: bool,
+}
+
+fn product_file_policy(path: &Path) -> Option<ProductFilePolicy> {
+    if path.ends_with(Path::new(".cursor/rules/AGENTS.mdc")) {
+        return Some(ProductFilePolicy {
+            created_file_prefix: "---\nalwaysApply: true\n---\n\n",
+            preserve_existing_frontmatter: true,
+        });
+    }
+
+    None
 }
 
 fn render_builtin_wrappers(
@@ -545,43 +525,8 @@ fn render_builtin_wrappers(
     dry_run: bool,
 ) -> Result<()> {
     let block = managed_block(source, effective, rules);
-    let wrappers = builtin_wrapper_paths().map(|path| {
-        let body = match path {
-            "CLAUDE.md" => format!(
-                "{}\n\n## Project Instructions\n\nAdd project-specific Claude instructions here.\n",
-                block
-            ),
-            "GEMINI.md" => format!(
-                "{}\n\n## Project Instructions\n\nAdd project-specific Gemini instructions here.\n",
-                block
-            ),
-            ".cursor/rules/AGENTS.mdc" => format!(
-                "---\ndescription: Universal baseline agent rules\nglobs:\nalwaysApply: true\n---\n\n{}\n\n## Project Instructions\n\nAdd project-specific Cursor instructions here.\n",
-                block
-            ),
-            ".cursorrules" => format!(
-                "{}\n\n## Project Instructions\n\nAdd project-specific legacy Cursor instructions here.\n",
-                block
-            ),
-            ".clinerules/AGENTS.md" => format!(
-                "# Universal Agent Rules\n\n{}\n\n## Project Instructions\n\nAdd project-specific Cline instructions here.\n",
-                block
-            ),
-            ".roo/rules/AGENTS.md" => format!(
-                "# Roo Code Rules\n\n{}\n\n## Project Instructions\n\nAdd project-specific Roo Code instructions here.\n",
-                block
-            ),
-            ".agent/rules/AGENTS.md" => format!(
-                "# Universal Agent Rules\n\n{}\n\n## Project Instructions\n\nAdd project-specific Antigravity instructions here.\n",
-                block
-            ),
-            _ => unreachable!("unknown built-in wrapper path"),
-        };
-        (path, body)
-    });
-
-    for (path, body) in wrappers {
-        write_section_managed_file(&project_root.join(path), &body, &block, dry_run)?;
+    for path in builtin_wrapper_paths() {
+        write_virtualized_file(&project_root.join(path), &block, dry_run)?;
     }
     Ok(())
 }
@@ -601,6 +546,32 @@ fn builtin_wrapper_paths() -> [&'static str; 7] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_targets_do_not_require_templates() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+[[modules]]
+id = "mission"
+path = "rules/00-mission.md"
+
+[[targets]]
+id = "agents"
+path = "AGENTS.md"
+managed = true
+
+[[targets]]
+id = "claude"
+path = "CLAUDE.md"
+template = "legacy-template-is-ignored.tmpl"
+managed = true
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.targets.len(), 2);
+        assert_eq!(manifest.targets[1].path, "CLAUDE.md");
+    }
 
     #[test]
     fn replaces_existing_managed_block() {
@@ -638,21 +609,37 @@ mod tests {
     }
 
     #[test]
-    fn creates_missing_section_managed_file() {
+    fn creates_missing_virtualized_file_with_only_managed_block() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("AGENTS.md");
         let block = "<!-- OVERMIND:START source=b pack=x -->\nnew\n<!-- OVERMIND:END -->";
-        let initial = default_agent_rule_body(block);
 
-        write_section_managed_file(&path, &initial, block, false).unwrap();
+        write_virtualized_file(&path, block, false).unwrap();
 
         let written = fs::read_to_string(path).unwrap();
-        assert!(written.contains(block));
-        assert!(written.contains("## Project Instructions"));
+        assert_eq!(written, managed_only_body(block));
     }
 
     #[test]
-    fn section_managed_file_replaces_block_and_preserves_local_content() {
+    fn creates_missing_cursor_rule_file_with_required_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".cursor/rules/AGENTS.mdc");
+        let block = "<!-- OVERMIND:START source=b pack=x -->\nnew\n<!-- OVERMIND:END -->";
+
+        write_virtualized_file(&path, block, false).unwrap();
+
+        let written = fs::read_to_string(path).unwrap();
+        assert_eq!(
+            written,
+            format!(
+                "---\nalwaysApply: true\n---\n\n{}",
+                managed_only_body(block)
+            )
+        );
+    }
+
+    #[test]
+    fn virtualized_file_replaces_block_and_preserves_local_content() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("CLAUDE.md");
         fs::write(
@@ -662,7 +649,7 @@ mod tests {
         .unwrap();
 
         let block = "<!-- OVERMIND:START source=b pack=x -->\nnew\n<!-- OVERMIND:END -->";
-        write_section_managed_file(&path, block, block, false).unwrap();
+        write_virtualized_file(&path, block, false).unwrap();
 
         let written = fs::read_to_string(path).unwrap();
         assert!(written.contains("intro"));
@@ -672,18 +659,75 @@ mod tests {
     }
 
     #[test]
-    fn section_managed_file_inserts_block_into_existing_unmanaged_file() {
+    fn virtualized_file_drops_legacy_scaffold_when_replacing_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("CLAUDE.md");
+        fs::write(
+            &path,
+            "# Agent Instructions\n\n<!-- OVERMIND:START source=a pack=x -->\nold\n<!-- OVERMIND:END -->\n\n## Project Instructions\n\nAdd project-specific Claude instructions here.\n",
+        )
+        .unwrap();
+
+        let block = "<!-- OVERMIND:START source=b pack=x -->\nnew\n<!-- OVERMIND:END -->";
+        write_virtualized_file(&path, block, false).unwrap();
+
+        let written = fs::read_to_string(path).unwrap();
+        assert_eq!(written, managed_only_body(block));
+    }
+
+    #[test]
+    fn cursor_rule_drops_legacy_scaffold_but_preserves_existing_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".cursor/rules/AGENTS.mdc");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let frontmatter =
+            "---\ndescription: Universal baseline agent rules\nglobs:\nalwaysApply: true\n---\n";
+        fs::write(
+            &path,
+            format!(
+                "{}\n<!-- OVERMIND:START source=a pack=x -->\nold\n<!-- OVERMIND:END -->\n\n## Project Instructions\n\nAdd project-specific Cursor instructions here.\n",
+                frontmatter
+            ),
+        )
+        .unwrap();
+
+        let block = "<!-- OVERMIND:START source=b pack=x -->\nnew\n<!-- OVERMIND:END -->";
+        write_virtualized_file(&path, block, false).unwrap();
+
+        let written = fs::read_to_string(path).unwrap();
+        assert_eq!(
+            written,
+            format!("{}\n{}", frontmatter, managed_only_body(block))
+        );
+    }
+
+    #[test]
+    fn existing_cursor_rule_block_only_does_not_get_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".cursor/rules/AGENTS.mdc");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "<!-- OVERMIND:START source=a pack=x -->\nold\n<!-- OVERMIND:END -->\n",
+        )
+        .unwrap();
+
+        let block = "<!-- OVERMIND:START source=b pack=x -->\nnew\n<!-- OVERMIND:END -->";
+        write_virtualized_file(&path, block, false).unwrap();
+
+        let written = fs::read_to_string(path).unwrap();
+        assert_eq!(written, managed_only_body(block));
+    }
+
+    #[test]
+    fn virtualized_file_inserts_block_into_existing_unmanaged_file() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("CLAUDE.md");
         fs::write(&path, "local only").unwrap();
 
         let block = "<!-- OVERMIND:START source=b pack=x -->\nnew\n<!-- OVERMIND:END -->";
-        let initial = format!(
-            "{}\n\n## Project Instructions\n\nAdd project-specific Claude instructions here.\n",
-            block
-        );
 
-        write_section_managed_file(&path, &initial, block, false).unwrap();
+        write_virtualized_file(&path, block, false).unwrap();
 
         let written = fs::read_to_string(path).unwrap();
         assert!(written.starts_with(block));
@@ -691,15 +735,14 @@ mod tests {
     }
 
     #[test]
-    fn section_managed_file_inserts_block_after_heading() {
+    fn virtualized_file_inserts_block_after_heading() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("AGENTS.md");
         fs::write(&path, "# Agent Instructions\n\n- keep me\n").unwrap();
 
         let block = "<!-- OVERMIND:START source=b pack=x -->\nnew\n<!-- OVERMIND:END -->";
-        let initial = default_agent_rule_body(block);
 
-        write_section_managed_file(&path, &initial, block, false).unwrap();
+        write_virtualized_file(&path, block, false).unwrap();
 
         let written = fs::read_to_string(path).unwrap();
         assert!(written.starts_with("# Agent Instructions\n\n<!-- OVERMIND:START"));
@@ -707,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn section_managed_file_inserts_block_after_frontmatter() {
+    fn virtualized_file_inserts_block_after_frontmatter() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join(".cursor/rules/AGENTS.mdc");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -718,12 +761,8 @@ mod tests {
         .unwrap();
 
         let block = "<!-- OVERMIND:START source=b pack=x -->\nnew\n<!-- OVERMIND:END -->";
-        let initial = format!(
-            "---\ndescription: Universal baseline agent rules\nglobs:\nalwaysApply: true\n---\n\n{}\n\n## Project Instructions\n\nAdd project-specific Cursor instructions here.\n",
-            block
-        );
 
-        write_section_managed_file(&path, &initial, block, false).unwrap();
+        write_virtualized_file(&path, block, false).unwrap();
 
         let written = fs::read_to_string(path).unwrap();
         assert!(written.starts_with(
@@ -733,18 +772,33 @@ mod tests {
     }
 
     #[test]
-    fn section_managed_file_rejects_broken_existing_block() {
+    fn virtualized_file_rejects_broken_existing_block() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("CLAUDE.md");
         fs::write(&path, "<!-- OVERMIND:START source=a pack=x -->\nold\n").unwrap();
 
         let block = "<!-- OVERMIND:START source=b pack=x -->\nnew\n<!-- OVERMIND:END -->";
-        let err = write_section_managed_file(&path, block, block, false).unwrap_err();
+        let err = write_virtualized_file(&path, block, false).unwrap_err();
         assert!(err.to_string().contains("without matching"));
     }
 
     #[test]
-    fn unlink_deletes_generated_scaffold_only_file() {
+    fn desync_deletes_managed_block_only_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("CLAUDE.md");
+        fs::write(
+            &path,
+            "<!-- OVERMIND:START source=a pack=x -->\nrules\n<!-- OVERMIND:END -->\n",
+        )
+        .unwrap();
+
+        desync_managed_file(&path, false).unwrap();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn desync_deletes_legacy_generated_scaffold_only_file() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("CLAUDE.md");
         fs::write(
@@ -753,13 +807,13 @@ mod tests {
         )
         .unwrap();
 
-        unlink_managed_file(&path, false).unwrap();
+        desync_managed_file(&path, false).unwrap();
 
         assert!(!path.exists());
     }
 
     #[test]
-    fn unlink_preserves_local_content_outside_block() {
+    fn desync_preserves_local_content_outside_block() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("CLAUDE.md");
         fs::write(
@@ -768,10 +822,31 @@ mod tests {
         )
         .unwrap();
 
-        unlink_managed_file(&path, false).unwrap();
+        desync_managed_file(&path, false).unwrap();
 
         let written = fs::read_to_string(path).unwrap();
         assert!(!written.contains("OVERMIND"));
         assert!(written.contains("- keep me"));
+    }
+
+    #[test]
+    fn desync_preserves_cursor_frontmatter_when_only_metadata_remains() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".cursor/rules/AGENTS.mdc");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let frontmatter = "---\nalwaysApply: true\n---\n";
+        fs::write(
+            &path,
+            format!(
+                "{}\n<!-- OVERMIND:START source=a pack=x -->\nrules\n<!-- OVERMIND:END -->\n",
+                frontmatter
+            ),
+        )
+        .unwrap();
+
+        desync_managed_file(&path, false).unwrap();
+
+        let written = fs::read_to_string(path).unwrap();
+        assert_eq!(written, frontmatter);
     }
 }

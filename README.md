@@ -37,7 +37,7 @@ ovmd sync
 
 That is enough for the default flow. `sync` renders agent rule files and does not create `.overmind.toml`.
 
-Check in the generated agent rule files if you want the team to use the same baseline:
+Check in the managed agent rule files if you want the team to use the same baseline:
 
 ```bash
 git add AGENTS.md CLAUDE.md GEMINI.md .cursor/rules/AGENTS.mdc .cursorrules .clinerules/AGENTS.md .roo/rules/AGENTS.md .agent/rules/AGENTS.md
@@ -112,26 +112,26 @@ If you want your local agent to know project-specific guidance without checking 
 ovmd sync
 ```
 
-Then add local notes outside the Overmind block in generated files such as `AGENTS.md`.
+Then add local notes outside the Overmind block in managed files such as `AGENTS.md`.
 
 Keep those files untracked or ignored in that repo. Future `ovmd sync` runs replace only the Overmind block and preserve your local notes.
 If a target file already exists without an Overmind block, `ovmd sync` inserts one and keeps the rest of the file.
 
 ### Remove Overmind From a Project
 
-Leave config alone, but remove generated Overmind sections/files:
+Leave config alone, but remove synced Overmind sections/files:
 
 ```bash
-ovmd unlink
+ovmd desync
 ```
 
 Preview first:
 
 ```bash
-ovmd unlink --dry-run
+ovmd desync --dry-run
 ```
 
-## Generated Agent Rule Files
+## Managed Agent Rule Files
 
 The default `universal` pack renders to the recommended rule locations for popular coding agents:
 
@@ -159,10 +159,18 @@ Edit outside that block for project-specific guidance.
 
 `ovmd sync` behavior:
 
-- Missing file: create it.
+- Missing file: create it with only the Overmind block, except new `.cursor/rules/AGENTS.mdc` files also get required `alwaysApply: true` frontmatter.
 - Existing file with an Overmind block: replace only the block.
 - Existing file without an Overmind block: insert one and preserve the existing file content.
+- Existing file with an Overmind block and no local content outside legacy scaffold: rewrite it to only the Overmind block, preserving existing Cursor frontmatter for `.cursor/rules/AGENTS.mdc`.
 - Existing file with a broken Overmind block: refuse to continue and ask for manual cleanup.
+
+`ovmd desync` behavior:
+
+- File with local content outside the Overmind block: remove only the block.
+- File with only Overmind-managed or legacy scaffold content after removing the block: delete the file.
+- Cursor frontmatter is preserved if it remains after removing the Overmind block.
+- Missing or unmanaged file: leave it alone.
 
 ## Source Resolution
 
@@ -226,7 +234,7 @@ Notes from current agent conventions:
 ```bash
 ovmd sync          # render agent rule files; does not create .overmind.toml
 ovmd init          # write .overmind.toml, then render
-ovmd unlink        # remove rendered Overmind sections/files; keep config
+ovmd desync        # remove synced Overmind sections/files; keep config
 ovmd doctor        # show effective source, ref, pack, and source path
 ovmd module list   # list modules in the effective pack
 ovmd config edit   # edit project config

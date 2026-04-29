@@ -10,18 +10,18 @@ use crate::{
 };
 
 pub mod config_command;
+pub mod desync;
 pub mod doctor;
 pub mod init;
 pub mod module;
 pub mod pack;
 pub mod source;
 pub mod sync;
-pub mod unlink;
 
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         CliCommand::Init(options) => init::run(options),
-        CliCommand::Unlink(options) => unlink::run(options),
+        CliCommand::Desync(options) => desync::run(options),
         CliCommand::Sync(options) => sync::run(options),
         CliCommand::Doctor(options) => doctor::run(options),
         CliCommand::Source { command } => source::run(command),
