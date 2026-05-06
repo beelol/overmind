@@ -9,16 +9,16 @@ use std::{
 
 use crate::{
     cli::SyncOptions,
-    config::EffectiveSource,
+    config::EffectiveConfig,
     render::{self, RenderOptions},
     source::{self, SourceKind},
 };
 
-use super::effective_source;
+use super::effective_config;
 
 pub fn run(options: SyncOptions) -> Result<()> {
     let project_root = options.project.project_root()?;
-    let effective = effective_source(&project_root, &options.project)?;
+    let effective = effective_config(&project_root, &options.project)?;
     sync_once(&project_root, &effective, &options)?;
 
     if options.watch {
@@ -30,24 +30,26 @@ pub fn run(options: SyncOptions) -> Result<()> {
 
 fn sync_once(
     project_root: &Path,
-    effective: &EffectiveSource,
+    effective: &EffectiveConfig,
     options: &SyncOptions,
 ) -> Result<()> {
-    let resolved = source::resolve(effective, options.offline)?;
+    let resolved = source::resolve(&effective.source, options.offline)?;
     render::render_project(
         project_root,
         &resolved,
-        effective,
+        &effective.source,
         &RenderOptions {
             dry_run: options.project.dry_run,
             only: options.only.clone(),
             exclude: options.exclude.clone(),
+            targets: effective.sync.targets.clone(),
+            explicit_targets: effective.sync.explicit_targets,
         },
     )
 }
 
-fn watch(project_root: PathBuf, effective: EffectiveSource, options: SyncOptions) -> Result<()> {
-    let resolved = source::resolve(&effective, options.offline)?;
+fn watch(project_root: PathBuf, effective: EffectiveConfig, options: SyncOptions) -> Result<()> {
+    let resolved = source::resolve(&effective.source, options.offline)?;
     println!("Watching source: {}", resolved.path.display());
 
     match resolved.kind {
@@ -63,7 +65,7 @@ fn watch(project_root: PathBuf, effective: EffectiveSource, options: SyncOptions
 
 fn watch_filesystem(
     project_root: PathBuf,
-    effective: EffectiveSource,
+    effective: EffectiveConfig,
     options: SyncOptions,
     path: PathBuf,
 ) -> Result<()> {

@@ -16,9 +16,10 @@ pub struct Cli {
 pub enum Command {
     /// Create project config and render rule targets.
     Init(ProjectOptions),
-    /// Remove synced Overmind sections without deleting config.
-    #[command(alias = "unlink")]
-    Desync(ProjectOptions),
+    /// Remove rendered Overmind sections without deleting config.
+    Unlink(ProjectOptions),
+    /// Update ovmd by running the remote install script.
+    Update(UpdateOptions),
     /// Update the configured source and render rule targets.
     Sync(SyncOptions),
     /// Manage rule sources.
@@ -88,6 +89,13 @@ pub struct SyncOptions {
     /// Exclude these module ids.
     #[arg(long, value_delimiter = ',')]
     pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Args, Clone, Default)]
+pub struct UpdateOptions {
+    /// Directory to install ovmd into. Defaults to the current binary's directory.
+    #[arg(long)]
+    pub install_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]

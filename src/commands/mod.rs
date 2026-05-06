@@ -6,22 +6,24 @@ use std::{
 
 use crate::{
     cli::{Cli, Command as CliCommand, ProjectOptions},
-    config::{self, EffectiveSource, FlagOverrides},
+    config::{self, EffectiveConfig, EffectiveSource, FlagOverrides},
 };
 
 pub mod config_command;
-pub mod desync;
 pub mod doctor;
 pub mod init;
 pub mod module;
 pub mod pack;
 pub mod source;
 pub mod sync;
+pub mod unlink;
+pub mod update;
 
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         CliCommand::Init(options) => init::run(options),
-        CliCommand::Desync(options) => desync::run(options),
+        CliCommand::Unlink(options) => unlink::run(options),
+        CliCommand::Update(options) => update::run(options),
         CliCommand::Sync(options) => sync::run(options),
         CliCommand::Doctor(options) => doctor::run(options),
         CliCommand::Source { command } => source::run(command),
@@ -36,6 +38,13 @@ pub(crate) fn effective_source(
     options: &ProjectOptions,
 ) -> Result<EffectiveSource> {
     config::resolve_effective_source(project_root.to_path_buf(), FlagOverrides::from(options))
+}
+
+pub(crate) fn effective_config(
+    project_root: &Path,
+    options: &ProjectOptions,
+) -> Result<EffectiveConfig> {
+    config::resolve_effective_config(project_root.to_path_buf(), FlagOverrides::from(options))
 }
 
 pub(crate) fn open_editor(path: PathBuf) -> Result<()> {

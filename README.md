@@ -18,6 +18,12 @@ Install from release binaries:
 curl -fsSL https://raw.githubusercontent.com/beelol/overmind/master/scripts/install.sh | bash
 ```
 
+Update an existing install:
+
+```bash
+ovmd update
+```
+
 Push a `v*` tag such as `v0.1.2` to publish a GitHub release with platform binaries under [Releases](https://github.com/beelol/overmind/releases).
 
 Local development from this repo:
@@ -40,7 +46,7 @@ That is enough for the default flow. `sync` renders agent rule files and does no
 Check in the managed agent rule files if you want the team to use the same baseline:
 
 ```bash
-git add AGENTS.md CLAUDE.md GEMINI.md .cursor/rules/AGENTS.mdc .cursorrules .clinerules/AGENTS.md .roo/rules/AGENTS.md .agent/rules/AGENTS.md
+git add AGENTS.md CLAUDE.md GEMINI.md .cursor/rules/overmind.mdc .clinerules/overmind.md .roo/rules/overmind.md .agent/rules/overmind.md
 git commit -m "Add shared agent rules"
 ```
 
@@ -112,23 +118,24 @@ If you want your local agent to know project-specific guidance without checking 
 ovmd sync
 ```
 
-Then add local notes outside the Overmind block in managed files such as `AGENTS.md`.
+Then add local notes outside the Overmind block in generated root files such as `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`.
+For directory-native targets such as `.cursor/rules/` or `.agent/rules/`, add sibling rule files instead of editing Overmind's generated file.
 
 Keep those files untracked or ignored in that repo. Future `ovmd sync` runs replace only the Overmind block and preserve your local notes.
 If a target file already exists without an Overmind block, `ovmd sync` inserts one and keeps the rest of the file.
 
 ### Remove Overmind From a Project
 
-Leave config alone, but remove synced Overmind sections/files:
+Leave config alone, but remove rendered Overmind sections/files:
 
 ```bash
-ovmd desync
+ovmd unlink
 ```
 
 Preview first:
 
 ```bash
-ovmd desync --dry-run
+ovmd unlink --dry-run
 ```
 
 ## Managed Agent Rule Files
@@ -136,14 +143,19 @@ ovmd desync --dry-run
 The default `universal` pack renders to the recommended rule locations for popular coding agents:
 
 ```text
-AGENTS.md                 # Codex; also supported by Cursor, Cline, and Antigravity
-CLAUDE.md                 # Claude Code
-GEMINI.md                 # Gemini CLI; Antigravity-specific override file
-.cursor/rules/AGENTS.mdc  # Cursor project rules directory
-.cursorrules              # Legacy Cursor/Cline compatibility
-.clinerules/AGENTS.md     # Cline workspace rules directory
-.roo/rules/AGENTS.md      # Roo Code workspace rules directory
-.agent/rules/AGENTS.md    # Antigravity workspace rules directory
+AGENTS.md                  # Canonical shared Overmind rules for Codex/OpenAI
+CLAUDE.md                  # Claude Code wrapper that references AGENTS.md
+GEMINI.md                  # Gemini CLI wrapper that references AGENTS.md
+.cursor/rules/overmind.mdc # Cursor native rules file that references AGENTS.md
+.clinerules/overmind.md    # Cline native rules file with full shared rules
+.roo/rules/overmind.md     # Roo native rules file with full shared rules
+.agent/rules/overmind.md   # Antigravity native rules file with full shared rules
+```
+
+Optional compatibility target:
+
+```text
+.cursorrules               # Legacy Cursor compatibility target; render only if you opt into `cursor-legacy`
 ```
 
 Each file contains a managed section:
@@ -155,7 +167,7 @@ Each file contains a managed section:
 <!-- OVERMIND:END -->
 ```
 
-Edit outside that block for project-specific guidance.
+Edit outside that block for project-specific guidance in root files. For directory-native targets, keep Overmind's generated `overmind.*` file intact and add sibling vendor-specific rule files beside it.
 
 `ovmd sync` behavior:
 
@@ -165,7 +177,7 @@ Edit outside that block for project-specific guidance.
 - Existing file with an Overmind block and no local content outside legacy scaffold: rewrite it to only the Overmind block, preserving existing Cursor frontmatter for `.cursor/rules/AGENTS.mdc`.
 - Existing file with a broken Overmind block: refuse to continue and ask for manual cleanup.
 
-`ovmd desync` behavior:
+`ovmd unlink` behavior:
 
 - File with local content outside the Overmind block: remove only the block.
 - File with only Overmind-managed or legacy scaffold content after removing the block: delete the file.
@@ -216,26 +228,29 @@ ref = "master"
 pack = "universal"
 
 [sync]
-targets = ["agents", "claude", "gemini", "cursor", "cursor-legacy", "cline", "roo", "antigravity"]
+targets = ["agents", "claude", "gemini", "cursor", "cline", "roo", "antigravity"]
 ```
+
+Add `"cursor-legacy"` only if you also want the legacy `.cursorrules` compatibility target.
 
 Notes from current agent conventions:
 
 - Codex reads `AGENTS.md`.
-- Claude Code reads `CLAUDE.md`.
-- Gemini CLI reads `GEMINI.md`.
-- Cursor supports root `AGENTS.md` and `.cursor/rules/*.mdc`; Overmind writes both so Cursor gets always-applied project-rule behavior without relying on file references.
-- Cline prefers `.clinerules/` and also recognizes `AGENTS.md`; Overmind writes one `.clinerules/AGENTS.md` file instead of arbitrary `universal-agent-rules` names.
-- Roo Code prefers `.roo/rules/` and falls back to `.roorules`; Overmind writes one `.roo/rules/AGENTS.md` file.
-- Antigravity supports `AGENTS.md`, `GEMINI.md`, and `.agent/rules/`; Overmind writes `.agent/rules/AGENTS.md` for the workspace rules directory.
+- Claude Code reads `CLAUDE.md`; Overmind renders a lightweight wrapper there that imports `AGENTS.md`.
+- Gemini CLI reads `GEMINI.md`; Overmind renders a lightweight wrapper there that imports `AGENTS.md`.
+- Cursor prefers `.cursor/rules/*.mdc`; Overmind writes `.cursor/rules/overmind.mdc` and keeps `.cursorrules` available only as an explicit `cursor-legacy` opt-in.
+- Cline prefers `.clinerules/`; Overmind writes one `.clinerules/overmind.md` file and leaves room for sibling local rules.
+- Roo Code prefers `.roo/rules/`; Overmind writes one `.roo/rules/overmind.md` file.
+- Antigravity supports `AGENTS.md`, `GEMINI.md`, and `.agent/rules/`; Overmind writes one `.agent/rules/overmind.md` file for the workspace rules UI.
 
 ## Commands
 
 ```bash
 ovmd sync          # render agent rule files; does not create .overmind.toml
 ovmd init          # write .overmind.toml, then render
-ovmd desync        # remove synced Overmind sections/files; keep config
-ovmd doctor        # show effective source, ref, pack, and source path
+ovmd unlink        # remove rendered Overmind sections/files; keep config
+ovmd update        # update ovmd from the latest release
+ovmd doctor        # show effective source, ref, pack, targets, and source path
 ovmd module list   # list modules in the effective pack
 ovmd config edit   # edit project config
 ovmd config edit --global

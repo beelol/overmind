@@ -6,7 +6,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{config::EffectiveSource, source::ResolvedSource};
+use crate::{
+    config::{EffectiveSource, DEFAULT_TARGETS},
+    source::ResolvedSource,
+};
 
 const START_MARKER: &str = "<!-- OVERMIND:START";
 const END_MARKER: &str = "<!-- OVERMIND:END -->";
@@ -29,6 +32,8 @@ pub struct Module {
 pub struct Target {
     pub id: String,
     pub path: String,
+    #[serde(default)]
+    pub template: Option<String>,
     #[serde(default = "default_true")]
     pub managed: bool,
 }
@@ -38,7 +43,80 @@ pub struct RenderOptions {
     pub dry_run: bool,
     pub only: Vec<String>,
     pub exclude: Vec<String>,
+    pub targets: Vec<String>,
+    pub explicit_targets: bool,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuiltinTargetKind {
+    Agents,
+    Claude,
+    Gemini,
+    Cursor,
+    CursorLegacy,
+    Cline,
+    Roo,
+    Antigravity,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BuiltinTarget {
+    id: &'static str,
+    path: &'static str,
+    legacy_paths: &'static [&'static str],
+    kind: BuiltinTargetKind,
+}
+
+const BUILTIN_TARGETS: [BuiltinTarget; 8] = [
+    BuiltinTarget {
+        id: "agents",
+        path: "AGENTS.md",
+        legacy_paths: &[],
+        kind: BuiltinTargetKind::Agents,
+    },
+    BuiltinTarget {
+        id: "claude",
+        path: "CLAUDE.md",
+        legacy_paths: &[],
+        kind: BuiltinTargetKind::Claude,
+    },
+    BuiltinTarget {
+        id: "gemini",
+        path: "GEMINI.md",
+        legacy_paths: &[],
+        kind: BuiltinTargetKind::Gemini,
+    },
+    BuiltinTarget {
+        id: "cursor",
+        path: ".cursor/rules/overmind.mdc",
+        legacy_paths: &[".cursor/rules/AGENTS.mdc"],
+        kind: BuiltinTargetKind::Cursor,
+    },
+    BuiltinTarget {
+        id: "cursor-legacy",
+        path: ".cursorrules",
+        legacy_paths: &[],
+        kind: BuiltinTargetKind::CursorLegacy,
+    },
+    BuiltinTarget {
+        id: "cline",
+        path: ".clinerules/overmind.md",
+        legacy_paths: &[".clinerules/AGENTS.md"],
+        kind: BuiltinTargetKind::Cline,
+    },
+    BuiltinTarget {
+        id: "roo",
+        path: ".roo/rules/overmind.md",
+        legacy_paths: &[".roo/rules/AGENTS.md"],
+        kind: BuiltinTargetKind::Roo,
+    },
+    BuiltinTarget {
+        id: "antigravity",
+        path: ".agent/rules/overmind.md",
+        legacy_paths: &[".agent/rules/AGENTS.md"],
+        kind: BuiltinTargetKind::Antigravity,
+    },
+];
 
 fn default_true() -> bool {
     true
@@ -101,33 +179,39 @@ pub fn render_project(
     options: &RenderOptions,
 ) -> Result<()> {
     let rules = build_rules(source, effective, options)?;
-    render_agents(project_root, source, effective, &rules, options.dry_run)?;
+    let selected_targets = selected_target_ids(options);
+
+    render_builtin_targets(
+        project_root,
+        source,
+        effective,
+        &rules,
+        &selected_targets,
+        options.dry_run,
+    )?;
 
     if source.single_file {
-        render_builtin_wrappers(project_root, source, effective, &rules, options.dry_run)?;
         return Ok(());
     }
 
-    let manifest = load_manifest(source, &effective.pack)?;
-    for target in manifest.targets {
-        if target.id == "agents" || !target.managed {
-            continue;
-        }
-        let block = managed_block(source, effective, &rules);
-        write_virtualized_file(&project_root.join(target.path), &block, options.dry_run)?;
-    }
-
-    Ok(())
+    render_manifest_targets(
+        project_root,
+        source,
+        effective,
+        &rules,
+        options,
+        &selected_targets,
+    )
 }
 
-pub fn desync_project(
+pub fn unlink_project(
     project_root: &Path,
     source: &ResolvedSource,
     effective: &EffectiveSource,
     dry_run: bool,
 ) -> Result<()> {
     for target in managed_target_paths(source, effective)? {
-        desync_managed_file(&project_root.join(target), dry_run)?;
+        unlink_managed_file(&project_root.join(target), dry_run)?;
     }
     Ok(())
 }
@@ -166,17 +250,23 @@ fn managed_target_paths(
     source: &ResolvedSource,
     effective: &EffectiveSource,
 ) -> Result<Vec<PathBuf>> {
-    let mut paths = vec![PathBuf::from("AGENTS.md")];
+    let mut paths = Vec::new();
+
+    for target in BUILTIN_TARGETS {
+        push_unique_path(&mut paths, PathBuf::from(target.path));
+        for legacy in target.legacy_paths {
+            push_unique_path(&mut paths, PathBuf::from(legacy));
+        }
+    }
 
     if source.single_file {
-        paths.extend(builtin_wrapper_paths().into_iter().map(PathBuf::from));
         return Ok(paths);
     }
 
     let manifest = load_manifest(source, &effective.pack)?;
     for target in manifest.targets {
-        if target.id != "agents" && target.managed {
-            paths.push(PathBuf::from(target.path));
+        if target.id != "agents" && target.managed && builtin_target(target.id.as_str()).is_none() {
+            push_unique_path(&mut paths, PathBuf::from(target.path));
         }
     }
 
@@ -294,18 +384,6 @@ fn stitch_sections(prefix: &str, block: &str, suffix: &str) -> String {
     format!("{}\n", sections.join("\n\n"))
 }
 
-fn render_agents(
-    project_root: &Path,
-    source: &ResolvedSource,
-    effective: &EffectiveSource,
-    rules: &str,
-    dry_run: bool,
-) -> Result<()> {
-    let target = project_root.join("AGENTS.md");
-    let block = managed_block(source, effective, rules);
-    write_virtualized_file(&target, &block, dry_run)
-}
-
 fn write_file_preserving_user_content(path: &Path, body: &str, dry_run: bool) -> Result<()> {
     if path.exists() && fs::read_to_string(path)? == body {
         println!("Unchanged {}", path.display());
@@ -330,7 +408,7 @@ fn write_file_preserving_user_content(path: &Path, body: &str, dry_run: bool) ->
     Ok(())
 }
 
-fn desync_managed_file(path: &Path, dry_run: bool) -> Result<()> {
+fn unlink_managed_file(path: &Path, dry_run: bool) -> Result<()> {
     if !path.exists() {
         println!("Missing {}", path.display());
         return Ok(());
@@ -343,7 +421,7 @@ fn desync_managed_file(path: &Path, dry_run: bool) -> Result<()> {
     }
 
     let next = remove_managed_block(&existing)?;
-    if should_delete_desynced_file(path, &next) {
+    if should_delete_unlinked_file(path, &next) {
         if dry_run {
             println!("Would delete {}", path.display());
         } else {
@@ -354,13 +432,13 @@ fn desync_managed_file(path: &Path, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    let next = desynced_body_for_path(path, &next);
+    let next = unlinked_body_for_path(path, &next);
     if dry_run {
         println!("Would update {}", path.display());
         return Ok(());
     }
 
-    fs::write(path, trim_desynced_content(&next))
+    fs::write(path, trim_unlinked_content(&next))
         .with_context(|| format!("failed to write {}", path.display()))?;
     println!("Updated {}", path.display());
     Ok(())
@@ -377,7 +455,7 @@ fn remove_managed_block(existing: &str) -> Result<String> {
         }
 
         bail!(
-            "\x1b[31mfound {} without matching {}. Manually clean the Overmind block before desyncing.\x1b[0m",
+            "\x1b[31mfound {} without matching {}. Manually clean the Overmind block before unlinking.\x1b[0m",
             START_MARKER,
             END_MARKER
         );
@@ -385,7 +463,7 @@ fn remove_managed_block(existing: &str) -> Result<String> {
 
     if existing.contains(END_MARKER) {
         bail!(
-            "\x1b[31mfound {} without matching {}. Manually clean the Overmind block before desyncing.\x1b[0m",
+            "\x1b[31mfound {} without matching {}. Manually clean the Overmind block before unlinking.\x1b[0m",
             END_MARKER,
             START_MARKER
         );
@@ -423,7 +501,7 @@ fn is_legacy_generated_scaffold_line(line: &str) -> bool {
     )
 }
 
-fn trim_desynced_content(body: &str) -> String {
+fn trim_unlinked_content(body: &str) -> String {
     format!("{}\n", body.trim())
 }
 
@@ -471,7 +549,7 @@ fn existing_virtualized_only_body_for_path(path: &Path, remaining: &str, block: 
     managed_only_body(block)
 }
 
-fn should_delete_desynced_file(path: &Path, remaining: &str) -> bool {
+fn should_delete_unlinked_file(path: &Path, remaining: &str) -> bool {
     if let Some(policy) = product_file_policy(path) {
         if policy.preserve_existing_frontmatter
             && is_overmind_virtualized_only(remaining)
@@ -484,7 +562,7 @@ fn should_delete_desynced_file(path: &Path, remaining: &str) -> bool {
     is_overmind_virtualized_only(remaining)
 }
 
-fn desynced_body_for_path(path: &Path, remaining: &str) -> String {
+fn unlinked_body_for_path(path: &Path, remaining: &str) -> String {
     if let Some(policy) = product_file_policy(path) {
         if policy.preserve_existing_frontmatter && is_overmind_virtualized_only(remaining) {
             if let Some(frontmatter) = leading_frontmatter(remaining) {
@@ -517,35 +595,349 @@ fn product_file_policy(path: &Path) -> Option<ProductFilePolicy> {
     None
 }
 
-fn render_builtin_wrappers(
+fn render_builtin_targets(
     project_root: &Path,
     source: &ResolvedSource,
     effective: &EffectiveSource,
     rules: &str,
+    selected_targets: &HashSet<String>,
     dry_run: bool,
 ) -> Result<()> {
-    let block = managed_block(source, effective, rules);
-    for path in builtin_wrapper_paths() {
-        write_virtualized_file(&project_root.join(path), &block, dry_run)?;
+    for target in BUILTIN_TARGETS {
+        if !selected_targets.contains(target.id) {
+            continue;
+        }
+        let (initial_body, block) = builtin_target_body(target, source, effective, rules);
+        sync_builtin_target(project_root, target, &initial_body, &block, dry_run)?;
     }
+
     Ok(())
 }
 
-fn builtin_wrapper_paths() -> [&'static str; 7] {
-    [
-        "CLAUDE.md",
-        "GEMINI.md",
-        ".cursor/rules/AGENTS.mdc",
-        ".cursorrules",
-        ".clinerules/AGENTS.md",
-        ".roo/rules/AGENTS.md",
-        ".agent/rules/AGENTS.md",
-    ]
+fn render_manifest_targets(
+    project_root: &Path,
+    source: &ResolvedSource,
+    effective: &EffectiveSource,
+    rules: &str,
+    options: &RenderOptions,
+    selected_targets: &HashSet<String>,
+) -> Result<()> {
+    let manifest = load_manifest(source, &effective.pack)?;
+    let root = pack_root(source, &effective.pack);
+    for target in manifest.targets {
+        if target.id == "agents" || !target.managed || builtin_target(target.id.as_str()).is_some()
+        {
+            continue;
+        }
+        if options.explicit_targets && !selected_targets.contains(&target.id) {
+            continue;
+        }
+        let block = managed_block(source, effective, rules);
+        if let Some(template) = target.template {
+            let template_path = root.join(template);
+            let template = fs::read_to_string(&template_path)
+                .with_context(|| format!("failed to read template {}", template_path.display()))?;
+            let rendered = apply_template(&template, source, effective, rules, &block);
+            write_section_managed_file(
+                &project_root.join(target.path),
+                &rendered,
+                &block,
+                options.dry_run,
+            )?;
+        } else {
+            write_virtualized_file(&project_root.join(target.path), &block, options.dry_run)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn selected_target_ids(options: &RenderOptions) -> HashSet<String> {
+    let configured = if options.targets.is_empty() {
+        DEFAULT_TARGETS
+            .iter()
+            .map(|target| target.to_string())
+            .collect()
+    } else {
+        options.targets.clone()
+    };
+
+    let mut selected: HashSet<String> = configured.into_iter().collect();
+    if selected.contains("claude")
+        || selected.contains("gemini")
+        || selected.contains("cursor")
+        || selected.contains("cursor-legacy")
+    {
+        selected.insert("agents".into());
+    }
+
+    selected
+}
+
+fn builtin_target(id: &str) -> Option<BuiltinTarget> {
+    BUILTIN_TARGETS
+        .iter()
+        .copied()
+        .find(|target| target.id == id)
+}
+
+fn builtin_target_body(
+    target: BuiltinTarget,
+    source: &ResolvedSource,
+    effective: &EffectiveSource,
+    rules: &str,
+) -> (String, String) {
+    match target.kind {
+        BuiltinTargetKind::Agents => {
+            let block = managed_block(source, effective, rules);
+            (default_agent_rule_body(&block), block)
+        }
+        BuiltinTargetKind::Claude => {
+            let block = managed_block(source, effective, "@AGENTS.md");
+            (
+                format!(
+                    "{}\n\n## Project Instructions\n\nAdd project-specific Claude instructions here.\n",
+                    block
+                ),
+                block,
+            )
+        }
+        BuiltinTargetKind::Gemini => {
+            let block = managed_block(source, effective, "@AGENTS.md");
+            (
+                format!(
+                    "{}\n\n## Project Instructions\n\nAdd project-specific Gemini instructions here.\n",
+                    block
+                ),
+                block,
+            )
+        }
+        BuiltinTargetKind::Cursor => {
+            let block = managed_block(source, effective, "@../../AGENTS.md");
+            (
+                format!(
+                    "---\ndescription: Shared Overmind rules\nglobs:\nalwaysApply: true\n---\n\n{}\n",
+                    block
+                ),
+                block,
+            )
+        }
+        BuiltinTargetKind::CursorLegacy => {
+            let block = managed_block(source, effective, "@AGENTS.md");
+            (
+                format!(
+                    "{}\n\n## Project Instructions\n\nAdd project-specific legacy Cursor instructions here.\n",
+                    block
+                ),
+                block,
+            )
+        }
+        BuiltinTargetKind::Cline | BuiltinTargetKind::Roo | BuiltinTargetKind::Antigravity => {
+            let block = managed_block(source, effective, rules);
+            (format!("{}\n", block), block)
+        }
+    }
+}
+
+fn sync_builtin_target(
+    project_root: &Path,
+    target: BuiltinTarget,
+    initial_body: &str,
+    block: &str,
+    dry_run: bool,
+) -> Result<()> {
+    let current_path = project_root.join(target.path);
+    let migrated_from = if current_path.exists() {
+        write_section_managed_file(&current_path, initial_body, block, dry_run)?;
+        None
+    } else if let Some((legacy_path, migrated_body)) =
+        migrate_from_legacy_path(project_root, target, initial_body, block)?
+    {
+        write_file_preserving_user_content(&current_path, &migrated_body, dry_run)?;
+        Some(legacy_path)
+    } else {
+        write_section_managed_file(&current_path, initial_body, block, dry_run)?;
+        None
+    };
+
+    for legacy in target.legacy_paths {
+        let legacy_path = project_root.join(legacy);
+        if migrated_from.as_ref() == Some(&legacy_path) {
+            delete_file(&legacy_path, dry_run)?;
+            continue;
+        }
+        cleanup_stale_legacy_target(&current_path, &legacy_path, dry_run)?;
+    }
+
+    Ok(())
+}
+
+fn default_agent_rule_body(block: &str) -> String {
+    managed_only_body(block)
+}
+
+fn apply_template(
+    template: &str,
+    source: &ResolvedSource,
+    effective: &EffectiveSource,
+    rules: &str,
+    block: &str,
+) -> String {
+    template
+        .replace("{{overmind_block}}", block)
+        .replace("{{rules}}", rules.trim())
+        .replace("{{source}}", &source.label)
+        .replace("{{pack}}", &effective.pack)
+}
+
+fn write_section_managed_file(path: &Path, body: &str, block: &str, dry_run: bool) -> Result<()> {
+    let next = if path.exists() {
+        let existing = fs::read_to_string(path)?;
+        if contains_managed_marker(&existing) {
+            replace_managed_block(&existing, block)?
+        } else {
+            insert_managed_block(&existing, block)?
+        }
+    } else {
+        body.to_string()
+    };
+
+    write_file_preserving_user_content(path, &next, dry_run)
+}
+
+fn is_generated_scaffold_only(body: &str) -> bool {
+    is_overmind_virtualized_only(body)
+}
+
+fn migrate_from_legacy_path(
+    project_root: &Path,
+    target: BuiltinTarget,
+    initial_body: &str,
+    block: &str,
+) -> Result<Option<(PathBuf, String)>> {
+    for legacy in target.legacy_paths {
+        let legacy_path = project_root.join(legacy);
+        if !legacy_path.exists() {
+            continue;
+        }
+
+        let existing = fs::read_to_string(&legacy_path)?;
+        if !contains_managed_marker(&existing) {
+            println!(
+                "Warning: leaving unmanaged legacy target {} in place while writing {}.",
+                legacy_path.display(),
+                project_root.join(target.path).display()
+            );
+            continue;
+        }
+
+        let body = migrate_legacy_body(&existing, initial_body, block)?;
+        return Ok(Some((legacy_path, body)));
+    }
+
+    Ok(None)
+}
+
+fn migrate_legacy_body(existing: &str, initial_body: &str, block: &str) -> Result<String> {
+    let remaining = remove_managed_block(existing)?;
+    if remaining.trim().is_empty() || is_generated_scaffold_only(&remaining) {
+        return Ok(initial_body.to_string());
+    }
+
+    replace_managed_block(existing, block)
+}
+
+fn cleanup_stale_legacy_target(
+    current_path: &Path,
+    legacy_path: &Path,
+    dry_run: bool,
+) -> Result<()> {
+    if !legacy_path.exists() {
+        return Ok(());
+    }
+
+    let existing = fs::read_to_string(legacy_path)?;
+    if !contains_managed_marker(&existing) {
+        println!(
+            "Warning: leaving unmanaged legacy target {} in place. Remove it manually if {} is now the canonical file.",
+            legacy_path.display(),
+            current_path.display()
+        );
+        return Ok(());
+    }
+
+    let remaining = match remove_managed_block(&existing) {
+        Ok(remaining) => remaining,
+        Err(_) => {
+            println!(
+                "Warning: leaving legacy target {} in place because its Overmind block is malformed.",
+                legacy_path.display()
+            );
+            return Ok(());
+        }
+    };
+
+    if remaining.trim().is_empty() || is_generated_scaffold_only(&remaining) {
+        return delete_file(legacy_path, dry_run);
+    }
+
+    println!(
+        "Warning: leaving legacy target {} in place because it still has content outside the Overmind block. Move any kept content into {} and delete the legacy file when ready.",
+        legacy_path.display(),
+        current_path.display()
+    );
+    Ok(())
+}
+
+fn contains_managed_marker(existing: &str) -> bool {
+    existing.contains(START_MARKER) || existing.contains(END_MARKER)
+}
+
+fn delete_file(path: &Path, dry_run: bool) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    if dry_run {
+        println!("Would delete {}", path.display());
+        return Ok(());
+    }
+
+    fs::remove_file(path).with_context(|| format!("failed to delete {}", path.display()))?;
+    println!("Deleted {}", path.display());
+    Ok(())
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.contains(&path) {
+        paths.push(path);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::SourceKind;
+
+    fn single_file_source(path: PathBuf) -> ResolvedSource {
+        ResolvedSource {
+            kind: SourceKind::LocalFile,
+            path,
+            label: "test-source".into(),
+            single_file: true,
+            git_backed: false,
+        }
+    }
+
+    fn pack_source(path: PathBuf) -> ResolvedSource {
+        ResolvedSource {
+            kind: SourceKind::LocalDir,
+            path,
+            label: "test-pack".into(),
+            single_file: false,
+            git_backed: false,
+        }
+    }
 
     #[test]
     fn manifest_targets_do_not_require_templates() {
@@ -783,7 +1175,7 @@ managed = true
     }
 
     #[test]
-    fn desync_deletes_managed_block_only_file() {
+    fn unlink_deletes_managed_block_only_file() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("CLAUDE.md");
         fs::write(
@@ -792,13 +1184,223 @@ managed = true
         )
         .unwrap();
 
-        desync_managed_file(&path, false).unwrap();
+        unlink_managed_file(&path, false).unwrap();
 
         assert!(!path.exists());
     }
 
     #[test]
-    fn desync_deletes_legacy_generated_scaffold_only_file() {
+    fn render_project_uses_vendor_native_builtin_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_file = tmp.path().join("source.md");
+        fs::write(&source_file, "shared rules").unwrap();
+        let project = tempfile::tempdir().unwrap();
+
+        render_project(
+            project.path(),
+            &single_file_source(source_file),
+            &EffectiveSource::default(),
+            &RenderOptions {
+                targets: DEFAULT_TARGETS
+                    .iter()
+                    .map(|target| target.to_string())
+                    .collect(),
+                explicit_targets: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(project.path().join("AGENTS.md").exists());
+        assert!(project.path().join("CLAUDE.md").exists());
+        assert!(project.path().join("GEMINI.md").exists());
+        assert!(project.path().join(".cursor/rules/overmind.mdc").exists());
+        assert!(project.path().join(".clinerules/overmind.md").exists());
+        assert!(project.path().join(".roo/rules/overmind.md").exists());
+        assert!(project.path().join(".agent/rules/overmind.md").exists());
+        assert!(!project.path().join(".cursor/rules/AGENTS.mdc").exists());
+
+        let claude = fs::read_to_string(project.path().join("CLAUDE.md")).unwrap();
+        let gemini = fs::read_to_string(project.path().join("GEMINI.md")).unwrap();
+        let cursor = fs::read_to_string(project.path().join(".cursor/rules/overmind.mdc")).unwrap();
+        let cline = fs::read_to_string(project.path().join(".clinerules/overmind.md")).unwrap();
+
+        assert!(claude.contains("@AGENTS.md"));
+        assert!(gemini.contains("@AGENTS.md"));
+        assert!(cursor.contains("@../../AGENTS.md"));
+        assert!(!cursor.contains("shared rules"));
+        assert!(cline.contains("shared rules"));
+    }
+
+    #[test]
+    fn render_project_honors_target_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_file = tmp.path().join("source.md");
+        fs::write(&source_file, "shared rules").unwrap();
+        let project = tempfile::tempdir().unwrap();
+
+        render_project(
+            project.path(),
+            &single_file_source(source_file),
+            &EffectiveSource::default(),
+            &RenderOptions {
+                targets: vec!["cline".into()],
+                explicit_targets: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(!project.path().join("CLAUDE.md").exists());
+        assert!(!project.path().join(".cursor/rules/overmind.mdc").exists());
+        assert!(project.path().join(".clinerules/overmind.md").exists());
+        assert!(!project.path().join("AGENTS.md").exists());
+    }
+
+    #[test]
+    fn render_project_migrates_legacy_directory_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_file = tmp.path().join("source.md");
+        fs::write(&source_file, "shared rules").unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let legacy = project.path().join(".clinerules/AGENTS.md");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(
+            &legacy,
+            "# Universal Agent Rules\n\n<!-- OVERMIND:START source=old pack=universal -->\nold rules\n<!-- OVERMIND:END -->\n\n- keep me\n",
+        )
+        .unwrap();
+
+        render_project(
+            project.path(),
+            &single_file_source(source_file),
+            &EffectiveSource::default(),
+            &RenderOptions {
+                targets: vec!["cline".into()],
+                explicit_targets: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let current = project.path().join(".clinerules/overmind.md");
+        let written = fs::read_to_string(current).unwrap();
+        assert!(written.contains("shared rules"));
+        assert!(written.contains("- keep me"));
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn render_project_keeps_legacy_directory_target_with_user_content_when_new_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_file = tmp.path().join("source.md");
+        fs::write(&source_file, "shared rules").unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let current = project.path().join(".clinerules/overmind.md");
+        let legacy = project.path().join(".clinerules/AGENTS.md");
+        fs::create_dir_all(current.parent().unwrap()).unwrap();
+        fs::write(
+            &current,
+            "<!-- OVERMIND:START source=old pack=universal -->\nold rules\n<!-- OVERMIND:END -->\n",
+        )
+        .unwrap();
+        fs::write(
+            &legacy,
+            "# Universal Agent Rules\n\n<!-- OVERMIND:START source=old pack=universal -->\nold rules\n<!-- OVERMIND:END -->\n\n- keep legacy note\n",
+        )
+        .unwrap();
+
+        render_project(
+            project.path(),
+            &single_file_source(source_file),
+            &EffectiveSource::default(),
+            &RenderOptions {
+                targets: vec!["cline".into()],
+                explicit_targets: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let current_written = fs::read_to_string(current).unwrap();
+        let legacy_written = fs::read_to_string(legacy).unwrap();
+        assert!(current_written.contains("shared rules"));
+        assert!(legacy_written.contains("- keep legacy note"));
+        assert!(legacy_written.contains("OVERMIND:START"));
+    }
+
+    #[test]
+    fn render_project_renders_unknown_manifest_targets_without_explicit_target_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pack_root = tmp.path().join("packs/universal");
+        fs::create_dir_all(pack_root.join("rules")).unwrap();
+        fs::create_dir_all(pack_root.join("templates")).unwrap();
+        fs::write(
+            pack_root.join("manifest.toml"),
+            r#"
+modules = [{ id = "base", path = "rules/base.md", enabled = true }]
+targets = [{ id = "custom", path = "CUSTOM.md", template = "templates/custom.md", managed = true }]
+"#,
+        )
+        .unwrap();
+        fs::write(pack_root.join("rules/base.md"), "shared rules").unwrap();
+        fs::write(
+            pack_root.join("templates/custom.md"),
+            "{{overmind_block}}\n\ncustom target\n",
+        )
+        .unwrap();
+        let project = tempfile::tempdir().unwrap();
+
+        render_project(
+            project.path(),
+            &pack_source(tmp.path().to_path_buf()),
+            &EffectiveSource::default(),
+            &RenderOptions::default(),
+        )
+        .unwrap();
+
+        assert!(project.path().join("CUSTOM.md").exists());
+    }
+
+    #[test]
+    fn render_project_filters_unknown_manifest_targets_when_targets_are_explicit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pack_root = tmp.path().join("packs/universal");
+        fs::create_dir_all(pack_root.join("rules")).unwrap();
+        fs::create_dir_all(pack_root.join("templates")).unwrap();
+        fs::write(
+            pack_root.join("manifest.toml"),
+            r#"
+modules = [{ id = "base", path = "rules/base.md", enabled = true }]
+targets = [{ id = "custom", path = "CUSTOM.md", template = "templates/custom.md", managed = true }]
+"#,
+        )
+        .unwrap();
+        fs::write(pack_root.join("rules/base.md"), "shared rules").unwrap();
+        fs::write(
+            pack_root.join("templates/custom.md"),
+            "{{overmind_block}}\n\ncustom target\n",
+        )
+        .unwrap();
+        let project = tempfile::tempdir().unwrap();
+
+        render_project(
+            project.path(),
+            &pack_source(tmp.path().to_path_buf()),
+            &EffectiveSource::default(),
+            &RenderOptions {
+                targets: vec!["agents".into()],
+                explicit_targets: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(!project.path().join("CUSTOM.md").exists());
+    }
+
+    #[test]
+    fn unlink_deletes_generated_scaffold_only_file() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("CLAUDE.md");
         fs::write(
@@ -807,13 +1409,13 @@ managed = true
         )
         .unwrap();
 
-        desync_managed_file(&path, false).unwrap();
+        unlink_managed_file(&path, false).unwrap();
 
         assert!(!path.exists());
     }
 
     #[test]
-    fn desync_preserves_local_content_outside_block() {
+    fn unlink_preserves_local_content_outside_block() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("CLAUDE.md");
         fs::write(
@@ -822,7 +1424,7 @@ managed = true
         )
         .unwrap();
 
-        desync_managed_file(&path, false).unwrap();
+        unlink_managed_file(&path, false).unwrap();
 
         let written = fs::read_to_string(path).unwrap();
         assert!(!written.contains("OVERMIND"));
@@ -830,7 +1432,7 @@ managed = true
     }
 
     #[test]
-    fn desync_preserves_cursor_frontmatter_when_only_metadata_remains() {
+    fn unlink_preserves_cursor_frontmatter_when_only_metadata_remains() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join(".cursor/rules/AGENTS.mdc");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -844,9 +1446,39 @@ managed = true
         )
         .unwrap();
 
-        desync_managed_file(&path, false).unwrap();
+        unlink_managed_file(&path, false).unwrap();
 
         let written = fs::read_to_string(path).unwrap();
         assert_eq!(written, frontmatter);
+    }
+
+    #[test]
+    fn unlink_removes_current_and_legacy_builtin_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let current = project.path().join(".clinerules/overmind.md");
+        let legacy = project.path().join(".clinerules/AGENTS.md");
+        fs::create_dir_all(current.parent().unwrap()).unwrap();
+        fs::write(
+            &current,
+            "<!-- OVERMIND:START source=a pack=universal -->\nrules\n<!-- OVERMIND:END -->\n",
+        )
+        .unwrap();
+        fs::write(
+            &legacy,
+            "<!-- OVERMIND:START source=a pack=universal -->\nrules\n<!-- OVERMIND:END -->\n",
+        )
+        .unwrap();
+
+        unlink_project(
+            project.path(),
+            &single_file_source(tmp.path().join("source.md")),
+            &EffectiveSource::default(),
+            false,
+        )
+        .unwrap();
+
+        assert!(!current.exists());
+        assert!(!legacy.exists());
     }
 }

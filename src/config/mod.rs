@@ -6,6 +6,15 @@ pub const PROJECT_CONFIG: &str = ".overmind.toml";
 pub const DEFAULT_URI: &str = "git@github.com:beelol/rules.git";
 pub const DEFAULT_REF: &str = "master";
 pub const DEFAULT_PACK: &str = "universal";
+pub const DEFAULT_TARGETS: &[&str] = &[
+    "agents",
+    "claude",
+    "gemini",
+    "cursor",
+    "cline",
+    "roo",
+    "antigravity",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileConfig {
@@ -34,12 +43,36 @@ pub struct EffectiveSource {
     pub pack: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveSync {
+    pub targets: Vec<String>,
+    pub explicit_targets: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveConfig {
+    pub source: EffectiveSource,
+    pub sync: EffectiveSync,
+}
+
 impl Default for EffectiveSource {
     fn default() -> Self {
         Self {
             uri: DEFAULT_URI.to_string(),
             ref_name: DEFAULT_REF.to_string(),
             pack: DEFAULT_PACK.to_string(),
+        }
+    }
+}
+
+impl Default for EffectiveSync {
+    fn default() -> Self {
+        Self {
+            targets: DEFAULT_TARGETS
+                .iter()
+                .map(|target| target.to_string())
+                .collect(),
+            explicit_targets: false,
         }
     }
 }
@@ -74,37 +107,56 @@ pub fn resolve_effective_source(
     project_root: PathBuf,
     flags: FlagOverrides,
 ) -> Result<EffectiveSource> {
-    let mut effective = EffectiveSource::default();
+    Ok(resolve_effective_config(project_root, flags)?.source)
+}
 
-    merge_file_config(&mut effective, load_config(global_config_path()?)?);
+pub fn resolve_effective_config(
+    project_root: PathBuf,
+    flags: FlagOverrides,
+) -> Result<EffectiveConfig> {
+    let mut source = EffectiveSource::default();
+    let mut sync = EffectiveSync::default();
+
+    merge_file_config(&mut source, &mut sync, load_config(global_config_path()?)?);
     merge_file_config(
-        &mut effective,
+        &mut source,
+        &mut sync,
         load_config(project_root.join(PROJECT_CONFIG))?,
     );
 
-    if let Some(source) = flags.source {
-        effective.uri = source;
+    if let Some(uri) = flags.source {
+        source.uri = uri;
     }
     if let Some(ref_name) = flags.ref_name {
-        effective.ref_name = ref_name;
+        source.ref_name = ref_name;
     }
     if let Some(pack) = flags.pack {
-        effective.pack = pack;
+        source.pack = pack;
     }
 
-    Ok(effective)
+    Ok(EffectiveConfig { source, sync })
 }
 
-pub fn merge_file_config(effective: &mut EffectiveSource, config: FileConfig) {
+pub fn merge_file_config(
+    source_effective: &mut EffectiveSource,
+    sync_effective: &mut EffectiveSync,
+    config: FileConfig,
+) {
     if let Some(source) = config.source {
         if let Some(uri) = source.uri {
-            effective.uri = uri;
+            source_effective.uri = uri;
         }
         if let Some(ref_name) = source.ref_name {
-            effective.ref_name = ref_name;
+            source_effective.ref_name = ref_name;
         }
         if let Some(pack) = source.pack {
-            effective.pack = pack;
+            source_effective.pack = pack;
+        }
+    }
+    if let Some(sync) = config.sync {
+        if let Some(targets) = sync.targets {
+            sync_effective.targets = targets;
+            sync_effective.explicit_targets = true;
         }
     }
 }
@@ -122,7 +174,7 @@ ref = "{}"
 pack = "{}"
 
 [sync]
-targets = ["agents", "claude", "gemini", "cursor", "cursor-legacy", "cline", "roo", "antigravity"]
+targets = ["agents", "claude", "gemini", "cursor", "cline", "roo", "antigravity"]
 "#,
         source.uri, source.ref_name, source.pack
     );
@@ -151,9 +203,11 @@ mod tests {
 
     #[test]
     fn flags_override_defaults() {
-        let mut effective = EffectiveSource::default();
+        let mut source = EffectiveSource::default();
+        let mut sync = EffectiveSync::default();
         merge_file_config(
-            &mut effective,
+            &mut source,
+            &mut sync,
             FileConfig {
                 source: Some(SourceConfig {
                     uri: Some("../rules".into()),
@@ -164,8 +218,31 @@ mod tests {
             },
         );
 
-        assert_eq!(effective.uri, "../rules");
-        assert_eq!(effective.ref_name, "dev");
-        assert_eq!(effective.pack, "custom");
+        assert_eq!(source.uri, "../rules");
+        assert_eq!(source.ref_name, "dev");
+        assert_eq!(source.pack, "custom");
+    }
+
+    #[test]
+    fn sync_targets_override_defaults() {
+        let mut source = EffectiveSource::default();
+        let mut sync = EffectiveSync::default();
+        merge_file_config(
+            &mut source,
+            &mut sync,
+            FileConfig {
+                source: None,
+                sync: Some(SyncConfig {
+                    targets: Some(vec!["agents".into(), "cursor".into()]),
+                    modules: None,
+                }),
+            },
+        );
+
+        assert_eq!(
+            sync.targets,
+            vec!["agents".to_string(), "cursor".to_string()]
+        );
+        assert!(sync.explicit_targets);
     }
 }
