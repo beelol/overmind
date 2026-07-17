@@ -17,5 +17,6 @@ pub fn run(options: ProjectOptions) -> Result<()> {
     println!("source_path: {}", resolved.path.display());
     println!("source_kind: {:?}", resolved.kind);
     println!("single_file: {}", resolved.single_file);
+    crate::skills::print_status()?;
     Ok(())
 }

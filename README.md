@@ -138,6 +138,20 @@ Preview first:
 ovmd unlink --dry-run
 ```
 
+## Global Skills
+
+Keep canonical user skills in this repository's `skills/` directory and reconcile them into both global agent installations:
+
+```bash
+ovmd skills sync --global
+# short form
+ovmd skills sync -g
+```
+
+The command creates managed symlinks under `~/.codex/skills/` and `~/.claude/skills/`. It refuses to overwrite unmanaged collisions, removes stale ledger-managed links, supports `--dry-run`, and records installations in the platform-local Overmind data directory. Project-local skill installation is not supported.
+
+`ovmd doctor` reports each ledger-managed skill as installed, missing, broken, stale, or conflicting.
+
 ## Managed Agent Rule Files
 
 The default `universal` pack renders to the recommended rule locations for popular coding agents:
@@ -247,6 +261,7 @@ Notes from current agent conventions:
 
 ```bash
 ovmd sync          # render agent rule files; does not create .overmind.toml
+ovmd skills sync -g # reconcile canonical skills into global Codex and Claude paths
 ovmd init          # write .overmind.toml, then render
 ovmd unlink        # remove rendered Overmind sections/files; keep config
 ovmd update        # update ovmd from the latest release

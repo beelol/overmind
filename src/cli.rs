@@ -22,6 +22,11 @@ pub enum Command {
     Update(UpdateOptions),
     /// Update the configured source and render rule targets.
     Sync(SyncOptions),
+    /// Manage agent skills.
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommand,
+    },
     /// Manage rule sources.
     Source {
         #[command(subcommand)]
@@ -89,6 +94,27 @@ pub struct SyncOptions {
     /// Exclude these module ids.
     #[arg(long, value_delimiter = ',')]
     pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SkillsCommand {
+    /// Reconcile canonical skills into agent installation directories.
+    Sync(SkillsSyncOptions),
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct SkillsSyncOptions {
+    /// Reconcile global Codex and Claude skill installations.
+    #[arg(short = 'g', long, required = true)]
+    pub global: bool,
+
+    /// Canonical skills directory. Defaults to ./skills.
+    #[arg(long)]
+    pub source: Option<PathBuf>,
+
+    /// Print changes without modifying installations or the ledger.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args, Clone, Default)]

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Address PR Review"
+  short_description: "Apply PR feedback without feature scope creep"
+  default_prompt: "Use $address-pr-review to address every review comment on this PR with scoped fixes and evidence."

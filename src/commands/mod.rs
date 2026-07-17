@@ -25,6 +25,7 @@ pub fn run(cli: Cli) -> Result<()> {
         CliCommand::Unlink(options) => unlink::run(options),
         CliCommand::Update(options) => update::run(options),
         CliCommand::Sync(options) => sync::run(options),
+        CliCommand::Skills { command } => crate::skills::run(command),
         CliCommand::Doctor(options) => doctor::run(options),
         CliCommand::Source { command } => source::run(command),
         CliCommand::Pack { command } => pack::run(command),
