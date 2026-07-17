@@ -146,11 +146,6 @@ pub fn reconcile(
 ) -> Result<()> {
     let skills = discover(source)?;
     let old = load_ledger(ledger_path)?;
-    let managed: BTreeSet<PathBuf> = old
-        .installations
-        .iter()
-        .map(|item| item.installed_path.clone())
-        .collect();
     let mut desired = Vec::new();
 
     for (skill, canonical_path) in &skills {
@@ -171,7 +166,7 @@ pub fn reconcile(
 
     // Validate every destination before making any changes.
     for item in &desired {
-        validate_destination(item, managed.contains(&item.installed_path))?;
+        validate_destination(item)?;
     }
     for stale in old
         .installations
@@ -227,17 +222,19 @@ pub fn reconcile(
     Ok(())
 }
 
-fn validate_destination(item: &Installation, was_managed: bool) -> Result<()> {
+fn validate_destination(item: &Installation) -> Result<()> {
     let Ok(metadata) = fs::symlink_metadata(&item.installed_path) else {
         return Ok(());
     };
-    if metadata.file_type().is_symlink()
-        && (link_points_to(&item.installed_path, &item.canonical_path) || was_managed)
-    {
+    // ovmd is the source of truth: overwrite any symlink whose name matches a
+    // skill so it points back at the canonical file (re-pointing stale links,
+    // e.g. after the repo moves). Refuse only real files or directories we did
+    // not create, to avoid clobbering unrelated content.
+    if metadata.file_type().is_symlink() {
         return Ok(());
     }
     bail!(
-        "refusing to replace unmanaged skill destination {}",
+        "refusing to replace non-symlink skill destination {}",
         item.installed_path.display()
     )
 }
@@ -341,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn repairs_managed_link_and_refuses_unmanaged_collision() {
+    fn repoints_symlinks_and_refuses_non_symlink_collision() {
         let temp = tempdir().unwrap();
         let source = temp.path().join("source");
         let target = temp.path().join("target");
@@ -357,7 +354,24 @@ mod tests {
         skill(&source, "two");
         fs::create_dir_all(target.join("two")).unwrap();
         let error = reconcile(&source, &[("codex", target)], &ledger, false).unwrap_err();
-        assert!(error.to_string().contains("unmanaged"));
+        assert!(error.to_string().contains("non-symlink"));
+    }
+
+    #[test]
+    fn overwrites_unmanaged_symlink_matching_skill() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        let ledger = temp.path().join("ledger.toml");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        skill(&source, "one");
+        // Pre-existing symlink we never recorded, pointing somewhere unrelated.
+        create_symlink(temp.path(), &target.join("one")).unwrap();
+
+        reconcile(&source, &[("codex", target.clone())], &ledger, false).unwrap();
+        let canonical = source.canonicalize().unwrap();
+        assert!(link_points_to(&target.join("one"), &canonical.join("one")));
     }
 
     #[test]

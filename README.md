@@ -148,7 +148,7 @@ ovmd skills sync --global
 ovmd skills sync -g
 ```
 
-The command creates managed symlinks under `~/.codex/skills/` and `~/.claude/skills/`. It refuses to overwrite unmanaged collisions, removes stale ledger-managed links, supports `--dry-run`, and records installations in the platform-local Overmind data directory. Project-local skill installation is not supported.
+The command creates managed symlinks under `~/.codex/skills/` and `~/.claude/skills/` that point back at this repository, so ovmd stays the source of truth and edits are seen live. Any existing symlink whose name matches a skill is overwritten to re-point at the canonical file (repairing stale links, e.g. after the repo moves); it refuses only to clobber real, non-symlink files. It removes stale ledger-managed links, supports `--dry-run`, and records installations in the platform-local Overmind data directory. Project-local skill installation is not supported.
 
 `ovmd doctor` reports each ledger-managed skill as installed, missing, broken, stale, or conflicting.
 
