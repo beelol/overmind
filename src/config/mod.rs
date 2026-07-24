@@ -20,6 +20,7 @@ pub const DEFAULT_TARGETS: &[&str] = &[
 pub struct FileConfig {
     pub source: Option<SourceConfig>,
     pub sync: Option<SyncConfig>,
+    pub skills: Option<SkillsConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -34,6 +35,18 @@ pub struct SourceConfig {
 pub struct SyncConfig {
     pub targets: Option<Vec<String>>,
     pub modules: Option<Vec<String>>,
+}
+
+/// Global-only selection for skills. Skills install machine-wide, so this is
+/// read from the global config only (never a project `.overmind.toml`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SkillsConfig {
+    /// Master on/off toggle for the whole skills set (the "global pack").
+    pub enabled: Option<bool>,
+    /// If non-empty, install only these skill ids.
+    pub only: Option<Vec<String>>,
+    /// Install everything except these skill ids.
+    pub exclude: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +66,36 @@ pub struct EffectiveSync {
 pub struct EffectiveConfig {
     pub source: EffectiveSource,
     pub sync: EffectiveSync,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveSkills {
+    pub enabled: bool,
+    pub only: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+impl Default for EffectiveSkills {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            only: Vec::new(),
+            exclude: Vec::new(),
+        }
+    }
+}
+
+impl EffectiveSkills {
+    /// Whether a skill with this id should be installed under the current selection.
+    pub fn includes(&self, id: &str) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if !self.only.is_empty() && !self.only.iter().any(|item| item == id) {
+            return false;
+        }
+        !self.exclude.iter().any(|item| item == id)
+    }
 }
 
 impl Default for EffectiveSource {
@@ -108,6 +151,24 @@ pub fn resolve_effective_source(
     flags: FlagOverrides,
 ) -> Result<EffectiveSource> {
     Ok(resolve_effective_config(project_root, flags)?.source)
+}
+
+/// Resolve skill selection from the global config only. Skills are machine-wide,
+/// so a per-project `.overmind.toml` must not govern them.
+pub fn resolve_effective_skills() -> Result<EffectiveSkills> {
+    let mut skills = EffectiveSkills::default();
+    if let Some(config) = load_config(global_config_path()?)?.skills {
+        if let Some(enabled) = config.enabled {
+            skills.enabled = enabled;
+        }
+        if let Some(only) = config.only {
+            skills.only = only;
+        }
+        if let Some(exclude) = config.exclude {
+            skills.exclude = exclude;
+        }
+    }
+    Ok(skills)
 }
 
 pub fn resolve_effective_config(
@@ -215,6 +276,7 @@ mod tests {
                     pack: Some("custom".into()),
                 }),
                 sync: None,
+                skills: None,
             },
         );
 
@@ -236,6 +298,7 @@ mod tests {
                     targets: Some(vec!["agents".into(), "cursor".into()]),
                     modules: None,
                 }),
+                skills: None,
             },
         );
 
@@ -244,5 +307,43 @@ mod tests {
             vec!["agents".to_string(), "cursor".to_string()]
         );
         assert!(sync.explicit_targets);
+    }
+
+    #[test]
+    fn parses_skills_section() {
+        let config: FileConfig = toml::from_str(
+            "[skills]\nenabled = false\nonly = [\"open-pr\"]\nexclude = [\"review-pr\"]\n",
+        )
+        .unwrap();
+        let skills = config.skills.unwrap();
+        assert_eq!(skills.enabled, Some(false));
+        assert_eq!(skills.only, Some(vec!["open-pr".to_string()]));
+        assert_eq!(skills.exclude, Some(vec!["review-pr".to_string()]));
+    }
+
+    #[test]
+    fn effective_skills_includes_logic() {
+        // Default: everything on.
+        assert!(EffectiveSkills::default().includes("open-pr"));
+
+        let disabled = EffectiveSkills {
+            enabled: false,
+            ..Default::default()
+        };
+        assert!(!disabled.includes("open-pr"));
+
+        let only = EffectiveSkills {
+            only: vec!["open-pr".into()],
+            ..Default::default()
+        };
+        assert!(only.includes("open-pr"));
+        assert!(!only.includes("review-pr"));
+
+        let exclude = EffectiveSkills {
+            exclude: vec!["review-pr".into()],
+            ..Default::default()
+        };
+        assert!(exclude.includes("open-pr"));
+        assert!(!exclude.includes("review-pr"));
     }
 }

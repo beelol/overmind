@@ -108,9 +108,13 @@ pub struct SkillsSyncOptions {
     #[arg(short = 'g', long, required = true)]
     pub global: bool,
 
-    /// Canonical skills directory. Defaults to ./skills.
+    /// Skills directory override (dev). Defaults to the configured rules-repo `skills/`.
     #[arg(long)]
     pub source: Option<PathBuf>,
+
+    /// Resolve from the current source cache without updating remote sources.
+    #[arg(long)]
+    pub offline: bool,
 
     /// Print changes without modifying installations or the ledger.
     #[arg(long)]

@@ -140,7 +140,7 @@ ovmd unlink --dry-run
 
 ## Global Skills
 
-Keep canonical user skills in this repository's `skills/` directory and reconcile them into both global agent installations:
+Skills are sourced from the configured rules repo, like packs. Declare them in a top-level `skills/manifest.toml`, then reconcile into both global agent installations:
 
 ```bash
 ovmd skills sync --global
@@ -148,7 +148,27 @@ ovmd skills sync --global
 ovmd skills sync -g
 ```
 
-The command creates managed symlinks under `~/.codex/skills/` and `~/.claude/skills/` that point back at this repository, so ovmd stays the source of truth and edits are seen live. Any existing symlink whose name matches a skill is overwritten to re-point at the canonical file (repairing stale links, e.g. after the repo moves); it refuses only to clobber real, non-symlink files. It removes stale ledger-managed links, supports `--dry-run`, and records installations in the platform-local Overmind data directory. Project-local skill installation is not supported.
+Manifest (in the rules repo, `skills/manifest.toml`):
+
+```toml
+[[skills]]
+id = "open-pr"       # stable id: how the skill is resolved and installed
+path = "open-pr"     # dir containing SKILL.md, relative to skills/
+enabled = true
+```
+
+Skills resolve and reconcile by manifest **id** (not directory name), so a skill can be renamed or relocated without breaking the ledger. The command creates managed symlinks under `~/.codex/skills/<id>` and `~/.claude/skills/<id>` pointing back at the source, so ovmd stays the source of truth and edits are seen live. It re-points any name-matching symlink, refuses only to clobber real (non-symlink) files, removes stale ledger-managed links, and supports `--dry-run`. Use `--source <dir>` to point at a local skills dir during development, and `--offline` to skip updating the remote source.
+
+Skills install machine-wide, so selection lives in the **global** config only (`config.toml`):
+
+```toml
+[skills]
+enabled = true                    # master on/off for the whole set
+only    = ["open-pr", "review-pr"] # optional: install only these ids
+# exclude = ["address-pr-review"]  # or: install all but these
+```
+
+> Legacy: a `skills/` dir without a `manifest.toml` still syncs by directory name, but prints a deprecation warning. This fallback will be removed in a future release.
 
 `ovmd doctor` reports each ledger-managed skill as installed, missing, broken, stale, or conflicting.
 

@@ -65,6 +65,12 @@ fn default_config_body() -> String {
 uri = "{}"
 ref = "{}"
 pack = "{}"
+
+# Global skills selection (skills install machine-wide).
+# [skills]
+# enabled = true
+# only = ["open-pr"]
+# exclude = ["address-pr-review"]
 "#,
         source.uri, source.ref_name, source.pack
     )

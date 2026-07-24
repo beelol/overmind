@@ -7,9 +7,14 @@ use std::{
 };
 
 use crate::cli::{SkillsCommand, SkillsSyncOptions};
+use crate::config::{self, EffectiveSkills, FlagOverrides};
+use crate::source;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Installation {
+    /// Stable id from the skills manifest. Backfilled from `skill` for pre-0.2.0 ledgers.
+    #[serde(default)]
+    pub id: String,
     pub skill: String,
     pub agent: String,
     pub canonical_path: PathBuf,
@@ -22,6 +27,25 @@ pub struct Ledger {
     pub installations: Vec<Installation>,
 }
 
+/// `skills/manifest.toml` in the rules repo. Mirrors the pack manifest shape.
+#[derive(Debug, Deserialize)]
+pub struct SkillsManifest {
+    #[serde(default)]
+    pub skills: Vec<SkillEntry>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SkillEntry {
+    pub id: String,
+    pub path: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 pub fn run(command: SkillsCommand) -> Result<()> {
     match command {
         SkillsCommand::Sync(options) => sync_global(options),
@@ -30,45 +54,97 @@ pub fn run(command: SkillsCommand) -> Result<()> {
 
 fn sync_global(options: SkillsSyncOptions) -> Result<()> {
     let ledger_path = ledger_path()?;
-    let source = match options.source {
-        Some(source) => source,
-        None => canonical_source_from_ledger(&ledger_path)?
-            .unwrap_or(std::env::current_dir()?.join("skills")),
-    };
-    let source = source
-        .canonicalize()
-        .with_context(|| format!("failed to resolve skills source {}", source.display()))?;
     let home = dirs::home_dir().context("could not resolve home directory")?;
-    reconcile(
-        &source,
-        &[
-            ("codex", home.join(".codex/skills")),
-            ("claude", home.join(".claude/skills")),
-        ],
-        &ledger_path,
-        options.dry_run,
-    )
+    let targets = [
+        ("codex", home.join(".codex/skills")),
+        ("claude", home.join(".claude/skills")),
+    ];
+
+    // Resolve the skills root: an explicit --source override (dev), otherwise the
+    // configured rules repo's top-level skills/ dir (same resolution packs use).
+    let skills_root = match &options.source {
+        Some(source) => source.clone(),
+        None => resolve_rules_skills_root(options.offline)?,
+    };
+
+    match load_skills_manifest(&skills_root)? {
+        Some(manifest) => {
+            let selection = config::resolve_effective_skills()?;
+            let desired =
+                build_desired_from_manifest(&skills_root, &manifest, &selection, &targets)?;
+            apply(desired, &ledger_path, options.dry_run)
+        }
+        None => {
+            eprintln!(
+                "warning: resolving skills by directory name is deprecated and will be removed in \
+                 a future release; add skills/manifest.toml to your rules repo."
+            );
+            reconcile(&skills_root, &targets, &ledger_path, options.dry_run)
+        }
+    }
 }
 
-fn canonical_source_from_ledger(path: &Path) -> Result<Option<PathBuf>> {
-    let ledger = load_ledger(path)?;
-    let Some(first) = ledger.installations.first() else {
+/// Resolve `<rules repo>/skills` via the effective source (global config -> project -> defaults),
+/// mirroring how packs locate `<source>/packs/<pack>`.
+fn resolve_rules_skills_root(offline: bool) -> Result<PathBuf> {
+    let project_root = std::env::current_dir()?;
+    let effective = config::resolve_effective_source(project_root, FlagOverrides::default())?;
+    let resolved = source::resolve(&effective, offline)?;
+    Ok(resolved.path.join("skills"))
+}
+
+/// Read `<root>/skills/manifest.toml`. Returns None when absent (triggers the legacy path).
+fn load_skills_manifest(root: &Path) -> Result<Option<SkillsManifest>> {
+    let manifest_path = root.join("manifest.toml");
+    if !manifest_path.is_file() {
         return Ok(None);
-    };
-    let parent = first
-        .canonical_path
-        .parent()
-        .context("canonical skill path has no parent directory")?
-        .to_path_buf();
-    if ledger.installations.iter().any(|item| {
-        item.canonical_path
-            .parent()
-            .map(|candidate| candidate != parent)
-            .unwrap_or(true)
-    }) {
-        bail!("skill ledger contains multiple canonical source directories; pass --source")
     }
-    Ok(Some(parent))
+    let raw = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let manifest = toml::from_str(&raw)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    Ok(Some(manifest))
+}
+
+/// Build the desired installation set from the manifest, honoring per-entry `enabled`
+/// and the global `[skills]` selection.
+fn build_desired_from_manifest(
+    root: &Path,
+    manifest: &SkillsManifest,
+    selection: &EffectiveSkills,
+    targets: &[(&str, PathBuf)],
+) -> Result<Vec<Installation>> {
+    let mut desired = Vec::new();
+    for entry in &manifest.skills {
+        if !entry.enabled || !selection.includes(&entry.id) {
+            continue;
+        }
+        let skill_dir = root.join(&entry.path);
+        let canonical = skill_dir.canonicalize().with_context(|| {
+            format!(
+                "skill '{}' path not found: {}",
+                entry.id,
+                skill_dir.display()
+            )
+        })?;
+        if !canonical.join("SKILL.md").is_file() {
+            bail!(
+                "skill '{}' has no SKILL.md at {}",
+                entry.id,
+                canonical.display()
+            );
+        }
+        for (agent, root_dir) in targets {
+            desired.push(Installation {
+                id: entry.id.clone(),
+                skill: entry.id.clone(),
+                agent: (*agent).to_string(),
+                canonical_path: canonical.clone(),
+                installed_path: root_dir.join(&entry.id),
+            });
+        }
+    }
+    Ok(desired)
 }
 
 pub fn ledger_path() -> Result<PathBuf> {
@@ -119,7 +195,15 @@ pub fn load_ledger(path: &Path) -> Result<Ledger> {
     }
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read skill ledger {}", path.display()))?;
-    toml::from_str(&raw).with_context(|| format!("failed to parse skill ledger {}", path.display()))
+    let mut ledger: Ledger = toml::from_str(&raw)
+        .with_context(|| format!("failed to parse skill ledger {}", path.display()))?;
+    // Migrate pre-0.2.0 ledgers: backfill the stable id from the skill name.
+    for item in &mut ledger.installations {
+        if item.id.is_empty() {
+            item.id = item.skill.clone();
+        }
+    }
+    Ok(ledger)
 }
 
 fn discover(source: &Path) -> Result<BTreeMap<String, PathBuf>> {
@@ -138,6 +222,7 @@ fn discover(source: &Path) -> Result<BTreeMap<String, PathBuf>> {
     Ok(skills)
 }
 
+/// Legacy name-match reconcile: discover `<source>/<name>/SKILL.md` dirs and install by name.
 pub fn reconcile(
     source: &Path,
     targets: &[(&str, PathBuf)],
@@ -145,12 +230,11 @@ pub fn reconcile(
     dry_run: bool,
 ) -> Result<()> {
     let skills = discover(source)?;
-    let old = load_ledger(ledger_path)?;
     let mut desired = Vec::new();
-
     for (skill, canonical_path) in &skills {
         for (agent, root) in targets {
             desired.push(Installation {
+                id: skill.clone(),
                 skill: skill.clone(),
                 agent: (*agent).to_string(),
                 canonical_path: canonical_path.clone(),
@@ -158,6 +242,12 @@ pub fn reconcile(
             });
         }
     }
+    apply(desired, ledger_path, dry_run)
+}
+
+/// Validate, (re)link, and atomically record the desired installation set.
+fn apply(desired: Vec<Installation>, ledger_path: &Path, dry_run: bool) -> Result<()> {
+    let old = load_ledger(ledger_path)?;
 
     let desired_paths: BTreeSet<_> = desired
         .iter()
@@ -412,6 +502,7 @@ mod tests {
         fs::create_dir_all(&canonical).unwrap();
         fs::create_dir_all(installed.parent().unwrap()).unwrap();
         let item = Installation {
+            id: "one".into(),
             skill: "one".into(),
             agent: "codex".into(),
             canonical_path: canonical.clone(),
@@ -429,5 +520,124 @@ mod tests {
         assert_eq!(installation_status(&item), "installed");
         fs::remove_dir_all(&canonical).unwrap();
         assert_eq!(installation_status(&item), "stale");
+    }
+
+    fn skills_root_with_manifest(root: &Path, entries: &[(&str, &str, bool)]) {
+        fs::create_dir_all(root).unwrap();
+        let mut manifest = String::new();
+        for (id, path, enabled) in entries {
+            skill(root, path);
+            manifest.push_str(&format!(
+                "[[skills]]\nid = \"{id}\"\npath = \"{path}\"\nenabled = {enabled}\n\n"
+            ));
+        }
+        fs::write(root.join("manifest.toml"), manifest).unwrap();
+    }
+
+    #[test]
+    fn manifest_drives_reconcile_by_id() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("skills");
+        let target = temp.path().join("claude");
+        let ledger = temp.path().join("ledger.toml");
+        // dir name differs from id to prove resolution is by manifest id, not folder name.
+        skills_root_with_manifest(&root, &[("open-pr", "open-pr-dir", true)]);
+
+        let manifest = load_skills_manifest(&root).unwrap().unwrap();
+        let targets = [("claude", target.clone())];
+        let desired =
+            build_desired_from_manifest(&root, &manifest, &EffectiveSkills::default(), &targets)
+                .unwrap();
+        apply(desired, &ledger, false).unwrap();
+
+        let canonical = root.join("open-pr-dir").canonicalize().unwrap();
+        assert!(link_points_to(&target.join("open-pr"), &canonical));
+        assert!(!target.join("open-pr-dir").exists());
+        assert_eq!(load_ledger(&ledger).unwrap().installations[0].id, "open-pr");
+    }
+
+    #[test]
+    fn global_config_disables_and_filters_skills() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("skills");
+        let target = temp.path().join("claude");
+        skills_root_with_manifest(
+            &root,
+            &[
+                ("open-pr", "open-pr", true),
+                ("review-pr", "review-pr", true),
+            ],
+        );
+        let manifest = load_skills_manifest(&root).unwrap().unwrap();
+        let targets = [("claude", target)];
+
+        // Master toggle off -> nothing desired.
+        let off = EffectiveSkills {
+            enabled: false,
+            ..Default::default()
+        };
+        assert!(
+            build_desired_from_manifest(&root, &manifest, &off, &targets)
+                .unwrap()
+                .is_empty()
+        );
+
+        // exclude drops one; only keeps one.
+        let excluded = EffectiveSkills {
+            exclude: vec!["review-pr".into()],
+            ..Default::default()
+        };
+        let desired = build_desired_from_manifest(&root, &manifest, &excluded, &targets).unwrap();
+        assert_eq!(desired.len(), 1);
+        assert_eq!(desired[0].id, "open-pr");
+
+        let only = EffectiveSkills {
+            only: vec!["review-pr".into()],
+            ..Default::default()
+        };
+        let desired = build_desired_from_manifest(&root, &manifest, &only, &targets).unwrap();
+        assert_eq!(desired.len(), 1);
+        assert_eq!(desired[0].id, "review-pr");
+    }
+
+    #[test]
+    fn manifest_entry_disabled_is_skipped() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("skills");
+        skills_root_with_manifest(&root, &[("open-pr", "open-pr", false)]);
+        let manifest = load_skills_manifest(&root).unwrap().unwrap();
+        let targets = [("claude", temp.path().join("claude"))];
+        assert!(build_desired_from_manifest(
+            &root,
+            &manifest,
+            &EffectiveSkills::default(),
+            &targets
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    #[test]
+    fn old_ledger_without_id_backfills_from_skill() {
+        let temp = tempdir().unwrap();
+        let ledger = temp.path().join("ledger.toml");
+        // A pre-0.2.0 ledger row with no `id` field.
+        fs::write(
+            &ledger,
+            "[[installations]]\nskill = \"open-pr\"\nagent = \"claude\"\n\
+             canonical_path = \"/src/open-pr\"\ninstalled_path = \"/dst/open-pr\"\n",
+        )
+        .unwrap();
+        let loaded = load_ledger(&ledger).unwrap();
+        assert_eq!(loaded.installations[0].id, "open-pr");
+    }
+
+    #[test]
+    fn missing_manifest_returns_none_for_fallback() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("skills");
+        fs::create_dir_all(&root).unwrap();
+        skill(&root, "open-pr"); // dirs present, but no manifest.toml
+        assert!(load_skills_manifest(&root).unwrap().is_none());
     }
 }
